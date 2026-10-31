@@ -4,6 +4,8 @@ Claude-powered agents for sales and marketing. They score leads, research accoun
 
 This covers **Phase 1** (prospecting and outreach), **Phase 2** (replies, meetings, deals, proposals, CRM hygiene) **Phase 3** (campaigns, content, ABM, competitor intel, buying signals, lead sourcing) and **Phase 4** (deal strategy, forecasting, attribution, A/B testing, and a learning loop).
 
+New to RevenueOS, or not technical? Start with the [plain-English guide](docs/USER_GUIDE.md).
+
 ## What's in it
 
 | Agent | Model | What it does |
