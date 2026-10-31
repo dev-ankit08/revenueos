@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>RevenueOS</title>
+  <style>html, body { margin: 0; height: 100%; } iframe { width: 100%; height: 100%; border: 0; }</style>
+</head>
+<body>
+  <!--
+    Dynamics 365 HTML web resource. Add it to the Lead form as a web resource control and tick
+    "Pass record object-type code and unique identifier as parameters". Set REVENUEOS_URL below.
+  -->
+  <iframe id="panel" title="RevenueOS"></iframe>
+  <script>
+    var REVENUEOS_URL = "https://revenueos.yourcompany.com";
+    var params = new URLSearchParams(window.location.search);
+    var id = (params.get("id") || "").replace(/[{}]/g, "").toLowerCase();
+    document.getElementById("panel").src =
+      REVENUEOS_URL + "/embed?crm=dynamics&id=" + encodeURIComponent(id);
+  </script>
+</body>
+</html>

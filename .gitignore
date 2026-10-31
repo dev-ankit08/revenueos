@@ -1,0 +1,15 @@
+# Secrets
+.env
+
+# Dependencies and build output
+node_modules/
+.next/
+*.tsbuildinfo
+__pycache__/
+.pytest_cache/
+.venv/
+
+# Local data (SQLite databases, client workspace databases, generated decks/proposals)
+*.db
+backend/workspaces/
+generated/

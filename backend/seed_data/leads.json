@@ -1,0 +1,14 @@
+[
+  {"first_name": "Priya", "last_name": "Sample", "title": "Chief Data Officer", "email": "priya.sample@example.com",
+   "company": "Siemens", "domain": "siemens.com", "industry": "Manufacturing", "employees": 300000, "country": "Germany",
+   "notes": "SAMPLE LEAD (fictional contact)."},
+  {"first_name": "Marcus", "last_name": "Demo", "title": "VP Revenue Operations", "email": "marcus.demo@example.com",
+   "company": "Crocs", "domain": "crocs.com", "industry": "Retail & Consumer Goods", "employees": 7000, "country": "United States",
+   "notes": "SAMPLE LEAD (fictional contact)."},
+  {"first_name": "Elena", "last_name": "Test", "title": "Director of Data Engineering", "email": "elena.test@example.com",
+   "company": "Maersk", "domain": "maersk.com", "industry": "Logistics", "employees": 100000, "country": "Denmark",
+   "notes": "SAMPLE LEAD (fictional contact)."},
+  {"first_name": "Sam", "last_name": "Placeholder", "title": "Marketing Intern", "email": "sam.placeholder@example.com",
+   "company": "Tiny Startup Ltd", "industry": "Software", "employees": 12, "country": "United Kingdom",
+   "notes": "SAMPLE LEAD (fictional contact and company)."}
+]

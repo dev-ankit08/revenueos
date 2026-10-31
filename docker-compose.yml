@@ -1,0 +1,35 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: revenueos
+      POSTGRES_PASSWORD: revenueos
+      POSTGRES_DB: revenueos
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U revenueos"]
+      interval: 5s
+      retries: 10
+
+  api:
+    build: ./backend
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://revenueos:revenueos@db:5432/revenueos
+      GENERATED_DIR: /data/generated
+    ports: ["8000:8000"]
+    volumes: [generated:/data/generated]
+    depends_on:
+      db: { condition: service_healthy }
+
+  web:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8000
+    ports: ["3000:3000"]
+    depends_on: [api]
+
+volumes:
+  pgdata:
+  generated:
