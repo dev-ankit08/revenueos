@@ -27,14 +27,50 @@ def tokenize(text: str) -> list[str]:
     return [t for t in _TOKEN.findall(text.lower()) if t not in _STOP]
 
 
-def chunk_text(text: str, max_chars: int = 1200) -> list[str]:
-    """Split on blank lines, then pack paragraphs into ~max_chars chunks."""
-    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+_SUFFIXES = ("ations", "ation", "ments", "ment", "ings", "ing", "ies", "ers", "er", "ed", "es", "ly", "s")
+
+
+def stem(token: str) -> str:
+    """Light suffix stripping so "forecasting", "forecasts" and "forecast" match. Numbers stay as they are."""
+    if token.isdigit() or len(token) <= 4:
+        return token
+    for suffix in _SUFFIXES:
+        if token.endswith(suffix) and len(token) - len(suffix) >= 4:
+            return token[: -len(suffix)] + ("y" if suffix == "ies" else "")
+    return token
+
+
+def terms(text: str) -> list[str]:
+    return [stem(t) for t in tokenize(text)]
+
+
+def _split_long(paragraph: str, max_chars: int) -> list[str]:
+    """A paragraph longer than a chunk is split at sentence boundaries instead of becoming one huge chunk."""
+    if len(paragraph) <= max_chars:
+        return [paragraph]
+    parts, current = [], ""
+    for sentence in re.split(r"(?<=[.!?])\s+", paragraph):
+        if current and len(current) + len(sentence) + 1 > max_chars:
+            parts.append(current)
+            current = sentence
+        else:
+            current = f"{current} {sentence}".strip()
+    if current:
+        parts.append(current)
+    return parts
+
+
+def chunk_text(text: str, max_chars: int = 1200, overlap_chars: int = 200) -> list[str]:
+    """Split on blank lines, pack paragraphs into ~max_chars chunks, and repeat a short tail of the previous
+    chunk at the start of the next so a fact split across a boundary is still found whole."""
+    paragraphs = [s for p in re.split(r"\n\s*\n", text) if p.strip() for s in _split_long(p.strip(), max_chars)]
     chunks, current = [], ""
     for p in paragraphs:
         if current and len(current) + len(p) > max_chars:
             chunks.append(current)
-            current = p
+            tail = current[-overlap_chars:]
+            tail = tail[tail.find(" ") + 1:] if " " in tail else tail
+            current = f"...{tail}\n\n{p}" if overlap_chars else p
         else:
             current = f"{current}\n\n{p}" if current else p
     if current:
@@ -52,7 +88,8 @@ def add_document(db: Session, title: str, category: str, content: str) -> KBDocu
     return doc
 
 
-def search(db: Session, query: str, k: int = 5, category: str | None = None) -> list[dict]:
+def search(db: Session, query: str, k: int = 5, category: str | None = None,
+           min_relative_score: float = 0.2) -> list[dict]:
     stmt = select(KBChunk, KBDocument).join(KBDocument)
     if category:
         stmt = stmt.where(KBDocument.category == category)
@@ -60,11 +97,11 @@ def search(db: Session, query: str, k: int = 5, category: str | None = None) -> 
     if not rows:
         return []
 
-    docs = [(chunk, doc, tokenize(f"{doc.title} {chunk.text}")) for chunk, doc in rows]
+    docs = [(chunk, doc, terms(f"{doc.title} {chunk.text}")) for chunk, doc in rows]
     n = len(docs)
     avgdl = sum(len(t) for *_, t in docs) / n
     df = Counter(term for *_, toks in docs for term in set(toks))
-    q_terms = tokenize(query)
+    q_terms = terms(query)
     k1, b = 1.5, 0.75
 
     scored = []
@@ -79,9 +116,13 @@ def search(db: Session, query: str, k: int = 5, category: str | None = None) -> 
         if score > 0:
             scored.append((score, chunk, doc))
     scored.sort(key=lambda s: s[0], reverse=True)
+    if not scored:
+        return []
+    floor = scored[0][0] * min_relative_score  # drop weak matches that only share a common word
     return [
-        {"doc_id": doc.id, "title": doc.title, "category": doc.category, "text": chunk.text}
-        for _, chunk, doc in scored[:k]
+        {"doc_id": doc.id, "chunk_id": chunk.id, "title": doc.title, "category": doc.category, "text": chunk.text,
+         "score": round(score, 3)}
+        for score, chunk, doc in scored[:k] if score >= floor
     ]
 
 
@@ -91,6 +132,24 @@ def documents_by_category(db: Session, *categories: str) -> list[KBDocument]:
             select(KBDocument).where(KBDocument.category.in_(categories)).order_by(KBDocument.id)
         )
     )
+
+
+CONTEXT_BUDGET_CHARS = 40_000  # ~10k tokens; the rest stays reachable through kb_search
+
+
+def _cap(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit].rsplit("\n", 1)[0] + "\n[...trimmed; use kb_search for the full document]"
+
+
+def reindex(db: Session) -> int:
+    """Re-chunk every document with the current chunker (after chunking changes)."""
+    n = 0
+    for doc in db.scalars(select(KBDocument)):
+        doc.chunks = [KBChunk(position=i, text=c) for i, c in enumerate(chunk_text(doc.content))]
+        n += 1
+    return n
 
 
 def company_context(db: Session) -> str:
@@ -103,7 +162,8 @@ def company_context(db: Session) -> str:
     ):
         docs = documents_by_category(db, *cats)
         if docs:
-            body = "\n\n".join(f"### {d.title}\n{d.content}" for d in docs)
+            per_doc = max(2_000, CONTEXT_BUDGET_CHARS // 4 // len(docs))
+            body = "\n\n".join(f"### {d.title}\n{_cap(d.content, per_doc)}" for d in docs)
             sections.append(f"## {label}\n{body}")
     tone = [line.partition(":")[2].strip() for d in documents_by_category(db, "rules")
             for line in d.content.splitlines() if line.strip().upper().startswith("TONE:")]
@@ -119,4 +179,4 @@ def company_context(db: Session) -> str:
             "## AVAILABLE PROOF POINTS (titles; use kb_search for details)\n"
             + "\n".join(f"- {d.title}" for d in proof)
         )
-    return "\n\n".join(sections) or "(Knowledge base is empty. Ask the user to add offering, ICP and case-study documents.)"
+    return _cap("\n\n".join(sections), CONTEXT_BUDGET_CHARS) if sections else ("(Knowledge base is empty. Ask the user to add offering, ICP and case-study documents.)")

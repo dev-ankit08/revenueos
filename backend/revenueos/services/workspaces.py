@@ -11,8 +11,11 @@ from . import secrets
 _SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{1,38}$")
 _cache: dict[int | None, dict] = {}
 INT_KEYS = {"smtp_port", "daily_send_cap", "per_domain_daily_cap", "personalisation_threshold",
-            "signal_scan_interval_days", "review_interval_days"}
+            "signal_scan_interval_days", "review_interval_days", "send_window_start_hour", "send_window_end_hour",
+            "mql_score", "mql_sla_hours", "brief_max_age_days", "dossier_max_age_days", "digest_hour",
+            "event_engaged_minutes", "renewal_lead_days"}
 FLOAT_KEYS = {"holdout_pct", "quarterly_target"}
+BOOL_KEYS = {"email_tracking", "send_weekdays_only", "utm_enabled", "intent_create_accounts"}
 
 
 def ensure_default() -> Workspace:
@@ -80,6 +83,8 @@ def update_settings(ctx: int | None, values: dict) -> None:
                 v = int(v)
             elif k in FLOAT_KEYS:
                 v = float(v)
+            elif k in BOOL_KEYS:
+                v = v if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "yes", "on")
             current[k] = secrets.encrypt(str(v)) if k in SECRET_KEYS else v
         ws.settings = current
     _cache.pop(ctx, None)

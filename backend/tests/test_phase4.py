@@ -2,6 +2,8 @@
 from datetime import datetime, timedelta, timezone
 
 import pytest
+
+from revenueos.config import settings
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -189,7 +191,15 @@ async def test_learning_needs_enough_data_then_updates_playbook(seeded, monkeypa
                            confidence="low", sample_note="25 emails, 5 replies")
     monkeypatch.setattr(strategy, "run_agent", fake_run_agent(pb))
     r = await strategy.learn_from_results()
-    assert r["updated"] and r["emails_analysed"] == 25
+    assert r["updated"] is False and "Need at least 50" in r["reason"]  # 25 sends: below the bar
+    object.__setattr__(settings, "learn_min_sent", 20)
+    object.__setattr__(settings, "learn_min_replies", 3)
+    r = await strategy.learn_from_results()
+    # A proposal, not live: an admin approves it first.
+    assert r["drafted"] and r["status"] == "draft" and r["emails_analysed"] == 25
+    with session_scope() as db:
+        assert db.scalar(select(KBDocument).where(KBDocument.title == strategy.PLAYBOOK_TITLE)) is None
+    strategy.publish_playbook(r["document_id"], "admin")
     with session_scope() as db:
         assert db.scalar(select(KBDocument).where(KBDocument.title == strategy.PLAYBOOK_TITLE)).category == "playbook"
         assert "WHAT WORKS" in kb.company_context(db)  # every agent now sees it

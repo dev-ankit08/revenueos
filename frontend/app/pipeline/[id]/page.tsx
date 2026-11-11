@@ -1,6 +1,8 @@
 "use client";
 import { use, useEffect, useState } from "react";
 import Documents from "@/app/documents";
+import Sequence from "@/app/sequence";
+import LeadData from "@/app/leaddata";
 import Timeline from "@/app/timeline";
 import { api, post, SalesDoc, waitForRun } from "@/lib/api";
 
@@ -154,7 +156,12 @@ export default function LeadDetail({ params }: { params: Promise<{ id: string }>
         </div>
       ) : <p className="muted" style={{ marginTop: 16 }}>No research brief yet. Use Research on the Pipeline page.</p>}
 
-      <h2>Outreach</h2>
+      <LeadData id={lead.contact_id} lead={lead} onDone={load} />
+
+      <h2>Sequence</h2>
+      <Sequence contactId={lead.contact_id} timezone={lead.timezone} />
+
+      <h2>All drafts</h2>
       <table>
         <thead><tr><th>Step</th><th>Message</th><th>Status</th></tr></thead>
         <tbody>

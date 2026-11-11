@@ -69,6 +69,26 @@ def authorize(agent: str, default_model: str) -> str:
         return own.model if own and own.model else default_model
 
 
+def prompt_addendum(agent: str) -> str | None:
+    """This workspace's extra instructions for the agent (AI governance page), if any."""
+    with session_scope() as db:
+        s = db.scalar(select(AgentSetting).where(AgentSetting.agent == agent))
+        if s is None or not s.prompt_addendum:
+            return None
+        return s.prompt_addendum.strip() or None
+
+
+def set_prompt_addendum(agent: str, text: str | None) -> None:
+    if agent not in AGENTS:
+        raise ValueError(f"Unknown agent {agent}")
+    with session_scope() as db:
+        s = db.scalar(select(AgentSetting).where(AgentSetting.agent == agent))
+        if s is None:
+            s = AgentSetting(agent=agent)
+            db.add(s)
+        s.prompt_addendum = (text or "").strip()[:4000] or None
+
+
 def _maybe_alert(setting: AgentSetting, spent: float) -> None:
     month = datetime.now(timezone.utc).strftime("%Y-%m")
     if spent < ALERT_AT * setting.monthly_budget_usd or setting.alerted_month == month:
@@ -108,7 +128,8 @@ def overview() -> dict:
             "agents": [{"agent": a, "label": label, "model": rows[a].model if a in rows else None,
                         "budget": rows[a].monthly_budget_usd if a in rows else None,
                         "enabled": rows[a].enabled if a in rows else True,
-                        "spent": round(spend.get(a) or 0, 4), "uses_web": a in WEB_AGENTS}
+                        "spent": round(spend.get(a) or 0, 4), "uses_web": a in WEB_AGENTS,
+                        "prompt_addendum": rows[a].prompt_addendum if a in rows else None}
                        for a, label in AGENTS.items()],
         }
 

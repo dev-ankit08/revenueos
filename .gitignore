@@ -13,3 +13,6 @@ __pycache__/
 *.db
 backend/workspaces/
 generated/
+
+# Eval reports (python -m evals.run)
+backend/evals/results/

@@ -110,26 +110,67 @@ def rule_pack_flags(db: Session, kind: str, text: str) -> list[dict]:
     return flags
 
 
+_CLAIM_STOP = {"our", "their", "they", "them", "with", "from", "that", "this", "have", "has", "were", "into",
+               "about", "over", "more", "than", "across", "which", "while", "after"}
+
+
+def claim_supported_by(claim_text: str, source_text: str) -> bool:
+    """Does the cited document actually say this? Every figure in the claim must appear in the source;
+    without figures, most of the claim's meaningful words must."""
+    from ..tools.kb import tokenize
+
+    figures = _numbers(claim_text) - {str(n) for n in range(0, 11)}
+    if figures:
+        return figures <= _numbers(source_text)
+    words = {t for t in tokenize(claim_text) if len(t) > 3 and t not in _CLAIM_STOP}
+    if not words:
+        return True
+    have = set(tokenize(source_text))
+    stems = {w[:6] for w in have}
+    hits = sum(1 for w in words if w in have or w[:6] in stems)
+    return hits / len(words) >= 0.5
+
+
 def check_claims(db: Session, claims: list[dict] | None, body: str, grounding: str) -> list[dict]:
     """Each factual claim should name its source: kb:<document title>, a URL from the brief or dossier,
-    or call / reply / history for what the customer told us."""
+    or call / reply / history for what the customer told us. Then:
+    - a kb: source must exist AND contain the claim (its figures, or most of its words);
+    - a URL must appear in the research AND be a page an assistant actually found or opened."""
+    from . import sources
+
     if not claims:
         if _numbers(body) - {str(n) for n in range(0, 11)}:
             return [{"severity": "warn", "code": "no_sources", "message": "Draft states figures but lists no sources."}]
         return []
-    titles = {t.lower() for t in db.scalars(select(KBDocument.title))}
-    unsourced = []
+    docs = {d.title.lower(): d.content for d in db.scalars(select(KBDocument))}
+    unsourced, mismatched, unopened = [], [], []
     for c in claims:
         src = (c.get("source") or "").strip()
-        ok = (src.lower().startswith("kb:") and src[3:].strip().lower() in titles) \
-            or (src.startswith("http") and src in grounding) \
-            or src.lower() in ("call", "reply", "history", "brief", "dossier", "meeting")
-        if not ok:
-            unsourced.append(c.get("text", "")[:80])
+        text = c.get("text", "")
+        if src.lower().startswith("kb:"):
+            content = docs.get(src[3:].strip().lower())
+            if content is None:
+                unsourced.append(text[:80])
+            elif not claim_supported_by(text, content):
+                mismatched.append(f"{text[:80]} (not in \"{src[3:].strip()}\")")
+        elif src.startswith("http"):
+            if src not in grounding:
+                unsourced.append(text[:80])
+            elif not sources.seen(db, src):
+                unopened.append(src[:100])
+        elif src.lower() not in ("call", "reply", "history", "brief", "dossier", "meeting"):
+            unsourced.append(text[:80])
+    flags = []
     if unsourced:
-        return [{"severity": "warn", "code": "unsourced_claim",
-                 "message": f"Sources couldn't be verified for: {'; '.join(unsourced)}"}]
-    return []
+        flags.append({"severity": "warn", "code": "unsourced_claim",
+                      "message": f"Sources couldn't be verified for: {'; '.join(unsourced)}"})
+    if mismatched:
+        flags.append({"severity": "warn", "code": "claim_not_in_source",
+                      "message": f"The cited document doesn't say this: {'; '.join(mismatched)}"})
+    if unopened:
+        flags.append({"severity": "warn", "code": "source_not_opened",
+                      "message": f"No assistant actually opened these pages; check them before sending: {'; '.join(unopened)}"})
+    return flags
 
 
 def grounding_text(db: Session, extra: str = "") -> str:
@@ -151,10 +192,30 @@ def check_draft(
         elif len(subject) > 70:
             flags.append({"severity": "warn", "code": "long_subject", "message": "Subject is over 70 characters."})
 
+    if kind in ("email", "linkedin_message") and contact:
+        from .privacy import basis_problem
+
+        if problem := basis_problem(contact):
+            flags.append({"severity": "block", "code": "no_lawful_basis", "message": problem})
+    if kind == "email" and contact and contact.email and not is_suppressed(db, contact.email):
+        from .datahealth import email_check
+
+        status, detail = email_check(db, contact)
+        if status == "invalid":
+            flags.append({"severity": "block", "code": "email_invalid",
+                          "message": f"Email address failed verification ({detail}). Find a correct address first."})
+        elif status == "risky":
+            flags.append({"severity": "warn", "code": "email_risky",
+                          "message": f"Email address may not be deliverable ({detail}). Sending risks a bounce."})
+
     words = len(body.split())
     if kind in ("email", "linkedin_message") and words > 200:
         flags.append({"severity": "warn", "code": "too_long", "message": f"{words} words; cold outreach performs best under 150."})
-    if _PLACEHOLDER.search(body) or (subject and _PLACEHOLDER.search(subject)):
+    check_body, check_subject = body, subject
+    if kind == "nurture_email":  # templates may use merge fields; anything else is still a placeholder
+        merge = re.compile(r"\{\{\s*(first_name|last_name|company|title)\s*\}\}")
+        check_body, check_subject = merge.sub("x", body), merge.sub("x", subject or "")
+    if _PLACEHOLDER.search(check_body) or (check_subject and _PLACEHOLDER.search(check_subject)):
         flags.append({"severity": "block", "code": "placeholder", "message": "Unfilled placeholder in draft."})
     if contact and contact.account_id and (leak := internal_leak(db, contact.account_id, f"{subject or ''} {body}")):
         flags.append({"severity": "block", "code": "internal_leak",
@@ -195,8 +256,10 @@ def send_capacity_error(db: Session, email: str) -> str | None:
     return None
 
 
-def compliance_footer() -> str:
-    return (
-        f"\n\n--\n{settings.company_name} · {settings.physical_address}\n"
-        "If you'd rather not hear from me, just reply \"unsubscribe\"."
-    )
+def compliance_footer(email: str | None = None) -> str:
+    from .privacy import unsubscribe_url
+
+    url = unsubscribe_url(email) if email else None
+    line = (f"If you'd rather not hear from me, reply \"unsubscribe\" or click {url}" if url
+            else "If you'd rather not hear from me, just reply \"unsubscribe\".")
+    return f"\n\n--\n{settings.company_name} · {settings.physical_address}\n{line}"

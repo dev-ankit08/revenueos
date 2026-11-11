@@ -28,6 +28,17 @@ class Settings:
     model_orchestrator: str = os.getenv("MODEL_ORCHESTRATOR", "claude-opus-5-5")
     model_worker: str = os.getenv("MODEL_WORKER", "claude-sonnet-5-5")
     model_fast: str = os.getenv("MODEL_FAST", "claude-haiku-5-5")
+    # Automatic retries (with backoff) on rate limits, overload and network errors from the Claude API.
+    claude_max_retries: int = _int("CLAUDE_MAX_RETRIES", 4)
+    # Knowledge-base search: a fast model re-ranks keyword matches so the best proof point comes first.
+    kb_rerank: bool = os.getenv("KB_RERANK", "true").lower() in ("1", "true", "yes")
+    # Research older than this is refreshed before writing outreach (days).
+    brief_max_age_days: int = _int("BRIEF_MAX_AGE_DAYS", 30)
+    # Learning loop: minimum evidence before it proposes a playbook, and whether proposals go live unreviewed.
+    learn_min_sent: int = _int("LEARN_MIN_SENT", 50)
+    learn_min_replies: int = _int("LEARN_MIN_REPLIES", 10)
+    learn_auto_publish: bool = os.getenv("LEARN_AUTO_PUBLISH", "false").lower() in ("1", "true", "yes")
+    dossier_max_age_days: int = _int("DOSSIER_MAX_AGE_DAYS", 90)
 
     # Salesforce. If unset, the built-in local CRM is used instead.
     sf_username: str | None = os.getenv("SF_USERNAME")
@@ -102,6 +113,67 @@ class Settings:
     daily_send_cap: int = _int("DAILY_SEND_CAP", 200)
     per_domain_daily_cap: int = _int("PER_DOMAIN_DAILY_CAP", 3)
 
+    # Email delivery: "smtp" (default; dry-run when SMTP_HOST is blank), "sendgrid" or "postmark".
+    # Sending services add HTML, open/click tracking and bounce/complaint webhooks.
+    email_provider: str = os.getenv("EMAIL_PROVIDER", "smtp").lower()
+    sendgrid_api_key: str | None = os.getenv("SENDGRID_API_KEY")
+    postmark_server_token: str | None = os.getenv("POSTMARK_SERVER_TOKEN")
+    # SendGrid signed event webhook public key (base64). When unset, events need ?token=<WEBHOOK_SECRET>.
+    sendgrid_webhook_public_key: str | None = os.getenv("SENDGRID_WEBHOOK_PUBLIC_KEY")
+    email_tracking: bool = os.getenv("EMAIL_TRACKING", "true").lower() in ("1", "true", "yes")
+    # Sequences send only inside this window, in the contact's time zone (else DEFAULT_TIMEZONE).
+    send_window_start_hour: int = _int("SEND_WINDOW_START_HOUR", 8)
+    send_window_end_hour: int = _int("SEND_WINDOW_END_HOUR", 18)
+    send_weekdays_only: bool = os.getenv("SEND_WEEKDAYS_ONLY", "true").lower() in ("1", "true", "yes")
+    default_timezone: str = os.getenv("DEFAULT_TIMEZONE", "UTC")
+    # Meeting booking link (Calendly, Microsoft Bookings, Google appointment page) offered in replies
+    # to interested prospects.
+    booking_url: str | None = os.getenv("BOOKING_URL")
+    # UTM tags on links to your own site in sent emails and approved content. Domains to tag
+    # (comma-separated); the sender email's domain is always included.
+    utm_enabled: bool = os.getenv("UTM_ENABLED", "true").lower() in ("1", "true", "yes")
+    utm_domains: str = os.getenv("UTM_DOMAINS", "")
+    # Data providers (per workspace). Enrichment: "apollo". Email verification: "zerobounce" or "neverbounce".
+    enrichment_provider: str | None = os.getenv("ENRICHMENT_PROVIDER")
+    apollo_api_key: str | None = os.getenv("APOLLO_API_KEY")
+    verification_provider: str | None = os.getenv("VERIFICATION_PROVIDER")
+    zerobounce_api_key: str | None = os.getenv("ZEROBOUNCE_API_KEY")
+    neverbounce_api_key: str | None = os.getenv("NEVERBOUNCE_API_KEY")
+    # Notifications: daily digest hour (local, DEFAULT_TIMEZONE; -1 = off) and where ops alerts go.
+    digest_hour: int = _int("DIGEST_HOUR", 8)
+    alert_email: str | None = os.getenv("ALERT_EMAIL")
+    # Privacy: countries where a lawful basis must be recorded before emailing (comma-separated, as stored on
+    # accounts, e.g. "Germany,DE,France,FR"); retention of AI run logs and rejected drafts (days).
+    consent_required_countries: str = os.getenv("CONSENT_REQUIRED_COUNTRIES", "")
+    run_retention_days: int = _int("RUN_RETENTION_DAYS", 180)
+    draft_retention_days: int = _int("DRAFT_RETENTION_DAYS", 365)
+    # Website tracking and intent: pages that signal buying intent when a known contact views them; whether a strong
+    # intent surge on an unknown company creates the account.
+    intent_pages: str = os.getenv("INTENT_PAGES", "/pricing,/demo,/contact,/request-a-demo,/plans")
+    intent_create_accounts: bool = os.getenv("INTENT_CREATE_ACCOUNTS", "false").lower() in ("1", "true", "yes")
+    # Events: attendees who stayed this long (minutes) or asked a question get a follow-up task.
+    event_engaged_minutes: int = _int("EVENT_ENGAGED_MINUTES", 30)
+    # Customers: open a renewal deal this many days before a contract ends.
+    renewal_lead_days: int = _int("RENEWAL_LEAD_DAYS", 90)
+    # LinkedIn publishing (company page or member).
+    linkedin_access_token: str | None = os.getenv("LINKEDIN_ACCESS_TOKEN")
+    linkedin_author_urn: str | None = os.getenv("LINKEDIN_AUTHOR_URN")
+    # Lifecycle: a lead becomes an MQL at this score once they have engaged (reply, click, inbound form).
+    mql_score: int = _int("MQL_SCORE", 70)
+    # Hours allowed between becoming an MQL and the first human touch.
+    mql_sla_hours: int = _int("MQL_SLA_HOURS", 24)
+
+    # Single sign-on (OpenID Connect: Microsoft Entra ID, Google Workspace, Okta...). Users must already exist
+    # unless OIDC_AUTO_PROVISION=true (new users join the default workspace as members).
+    oidc_issuer: str | None = os.getenv("OIDC_ISSUER")
+    oidc_client_id: str | None = os.getenv("OIDC_CLIENT_ID")
+    oidc_client_secret: str | None = os.getenv("OIDC_CLIENT_SECRET")
+    oidc_auto_provision: bool = os.getenv("OIDC_AUTO_PROVISION", "false").lower() in ("1", "true", "yes")
+    # Error tracking (optional; needs the sentry-sdk package).
+    sentry_dsn: str | None = os.getenv("SENTRY_DSN")
+    # Key rotation: put the previous SECRET_KEY here while re-encrypting (python -m revenueos.rotate_keys).
+    secret_key_old: str | None = os.getenv("SECRET_KEY_OLD")
+
     # If set, every /api request needs "Authorization: Bearer <API_TOKEN>"
     # and webhooks need "X-Webhook-Secret: <WEBHOOK_SECRET>".
     api_token: str | None = os.getenv("API_TOKEN")
@@ -131,11 +203,21 @@ WORKSPACE_KEYS = {
     "slack_signing_secret", "slack_bot_token", "slack_approvals_channel", "zoom_webhook_secret", "webhook_secret",
     "gong_access_key", "gong_access_secret", "holdout_pct", "quarterly_target", "personalisation_threshold",
     "signal_scan_interval_days", "review_interval_days",
+    "email_provider", "sendgrid_api_key", "postmark_server_token", "email_tracking", "sendgrid_webhook_public_key",
+    "send_window_start_hour", "send_window_end_hour", "send_weekdays_only", "default_timezone",
+    "booking_url", "utm_enabled", "utm_domains", "mql_score", "mql_sla_hours",
+    "brief_max_age_days", "dossier_max_age_days",
+    "enrichment_provider", "apollo_api_key", "verification_provider", "zerobounce_api_key", "neverbounce_api_key",
+    "digest_hour", "alert_email", "consent_required_countries",
+    "intent_pages", "intent_create_accounts", "event_engaged_minutes", "renewal_lead_days",
+    "linkedin_access_token", "linkedin_author_urn",
 }
 # Stored encrypted; never returned in full by the API.
 SECRET_KEYS = {"hubspot_token", "dynamics_client_secret", "sf_password", "sf_security_token", "zoho_client_secret",
                "zoho_refresh_token", "pipedrive_token", "smtp_password", "slack_signing_secret", "slack_bot_token",
-               "zoom_webhook_secret", "webhook_secret", "gong_access_secret"}
+               "zoom_webhook_secret", "webhook_secret", "gong_access_secret", "sendgrid_api_key",
+               "postmark_server_token", "apollo_api_key", "zerobounce_api_key", "neverbounce_api_key",
+               "linkedin_access_token"}
 
 
 class SettingsProxy:

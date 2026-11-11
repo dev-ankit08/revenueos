@@ -62,17 +62,47 @@ def create_user(email: str, password: str, workspace_id: int, role: str = "membe
     return u
 
 
-def login(email: str, password: str) -> tuple[str, User] | None:
+class MFARequired(Exception):
+    """Password was right; a two-factor code is needed (or was wrong)."""
+
+
+class AccountLocked(Exception):
+    pass
+
+
+def login(email: str, password: str, code: str | None = None) -> tuple[str, User] | None:
+    from . import secrets, security
+
     with control_scope() as db:
         u = db.scalar(select(User).where(func.lower(User.email) == email.lower(), User.active.is_(True)))
+        if u and security.locked(u):
+            raise AccountLocked(f"Too many failed attempts. Try again in {security.LOCK_MINUTES} minutes.")
         if not u or not verify_password(password, u.password_hash):
+            if u:
+                security.record_failure(u)
             return None
+        if u.mfa_enabled:
+            if not code:
+                raise MFARequired("Enter the 6-digit code from your authenticator app.")
+            if not security.verify_totp(secrets.decrypt(u.totp_secret), code):
+                security.record_failure(u)
+                raise MFARequired("That code didn't match. Try the current one.")
+        security.record_success(u)
         token = pysecrets.token_urlsafe(32)
         db.add(AuthSession(token_hash=_sha(token), user_id=u.id,
                            expires_at=datetime.now(timezone.utc) + timedelta(days=SESSION_DAYS)))
         db.flush()
         db.expunge(u)
         return token, u
+
+
+def session_for(user_id: int) -> str:
+    """A new session for an already-authenticated user (single sign-on)."""
+    token = pysecrets.token_urlsafe(32)
+    with control_scope() as db:
+        db.add(AuthSession(token_hash=_sha(token), user_id=user_id,
+                           expires_at=datetime.now(timezone.utc) + timedelta(days=SESSION_DAYS)))
+    return token
 
 
 def resolve(token: str) -> tuple[User, Workspace] | None:

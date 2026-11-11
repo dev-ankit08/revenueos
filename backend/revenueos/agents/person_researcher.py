@@ -67,7 +67,7 @@ async def research_person(contact_id: int, parent_run_id: int | None = None) -> 
                "notes_from_rep": c.inbound_message}
 
     submit, get_result = submit_tool(Dossier, "submit_dossier", "Submit the finished dossier (call once).")
-    await run_agent(
+    result = await run_agent(
         agent="person_researcher",
         model=settings.model_worker,
         role_prompt=ROLE,
@@ -78,14 +78,30 @@ async def research_person(contact_id: int, parent_run_id: int | None = None) -> 
         parent_run_id=parent_run_id,
     )
     d: Dossier = get_result()
+    from ..models import AgentRun
+    from ..services import sources as seen_sources
+
     with session_scope() as db:
+        statements = [s.model_dump() for s in d.public_statements]
+        srcs, unverified = list(d.sources), []
+        run = db.get(AgentRun, result.run_id)
+        if run and run.source_urls:
+            # Quotes attributed to a real person must come from a page the researcher actually read.
+            cited = srcs + [s.get("source") or "" for s in statements]
+            unverified = seen_sources.unverified(db, cited)
+            bad = {seen_sources.normalise(u) for u in unverified}
+            statements = [s for s in statements if seen_sources.normalise(s.get("source") or "") not in bad]
+            srcs = [u for u in srcs if seen_sources.normalise(u) not in bad]
         p = db.query(PersonProfile).filter_by(contact_id=contact_id).first() or PersonProfile(contact_id=contact_id)
         p.summary, p.role_history, p.priorities = d.summary, d.role_history, d.priorities
-        p.public_statements = [s.model_dump() for s in d.public_statements]
-        p.talking_points, p.communication_style, p.sources = d.talking_points, d.communication_style, d.sources
+        p.public_statements = statements
+        p.unverified_sources = unverified
+        p.talking_points, p.communication_style, p.sources = d.talking_points, d.communication_style, srcs
         p.updated_at = datetime.now(timezone.utc)
         db.add(p)
         db.add(Activity(contact_id=contact_id, type="dossier",
-                        detail=f"Person dossier: {len(d.public_statements)} sourced public statements"))
+                        detail=f"Person dossier: {len(statements)} sourced public statements"
+                               + (f" ({len(d.public_statements) - len(statements)} dropped: source never opened)"
+                                  if len(statements) < len(d.public_statements) else "")))
         db.flush()
         return dossier_dict(p)

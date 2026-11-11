@@ -35,7 +35,8 @@ New to RevenueOS, or not technical? Start with the [plain-English guide](docs/US
 - **Replies:** `POST /api/webhooks/reply` pauses the sequence at once (and honours explicit opt-outs immediately), then Reply Triage decides what happens next. Out-of-office auto-replies resume the sequence.
 - **Deal flow:** on a lead's page, **Prep a meeting** before the call, **Analyse a call** after it (this creates the deal and a follow-up draft), then **Build proposal + deck**. The **Deals** page shows MEDDICC, health, risks and next steps.
 - **CRM hygiene:** a rule-only report is written daily at no AI cost. Run it on demand from the **CRM hygiene** page.
-- **Follow-ups:** approved follow-ups are sent automatically when they come due, unless the prospect has replied.
+- **Sequences:** each multi-step sequence is an *enrollment*. Step delays count from when the first message was sent; a step never goes before the one before it, and follow-ups only go out in business hours in the contact's time zone (`SEND_WINDOW_*`, `DEFAULT_TIMEZONE`, or the lead's own time zone on their page). A reply pauses the sequence at once; Reply Triage resumes it after an out-of-office return date or stops it for any real answer. LinkedIn and call steps become dated items on the **Tasks** page. Pause, resume or stop a sequence from the lead's page.
+- **Sending service:** set `EMAIL_PROVIDER=sendgrid` or `postmark` for HTML email, open/click tracking and delivery events. Hard bounces, spam complaints and provider unsubscribes suppress the address and stop the sequence automatically.
 - **Campaigns:** describe the outcome on the **Campaigns** page, review the plan, then **Draft all content**. Pieces arrive in Approvals (filter: marketing content) and are published by a person.
 - **Revenue insights:** the **Insights** page shows the quarter forecast, pipeline by source, campaign results, reply rates by agent and sequence step, A/B tests and the learned playbook. **Deals** has a **Review** button per deal. Set `QUARTERLY_TARGET` for attainment and coverage. Set `REVIEW_INTERVAL_DAYS` to run deal reviews, the forecast and the learning loop automatically.
 - **A/B testing:** when a sequence is written with an A/B test, each contact is randomly assigned one variant (the other is auto-held out), so results are unbiased. A winner is declared only with 30+ sends per variant and p < 0.05 on positive replies.
@@ -66,6 +67,52 @@ Every assistant reads one timeline per account, built from all sources (shown on
 **Proving it works: holdout groups.** Outbound batches randomly hold back `HOLDOUT_PCT` (default 20%) of *eligible* leads from AI outreach. **Insights** compares meeting rate, deals and pipeline between the two groups and reports a significance test once each group has 30+ contacts. Held-out leads are protected: the writer refuses them unless a rep clicks **Release** (which removes them from the statistics).
 
 Privacy: internal team text is never shown to customers. A guardrail **blocks** any draft that repeats 7+ words of internal discussion. Raw text is deleted after `CONTEXT_RETENTION_DAYS` (default 90); summaries are kept. Native Gmail/Outlook and Google/Outlook calendar sync come next; until then, calendar events and Teams/Meet transcripts arrive through the generic endpoints (for example from Power Automate or Apps Script).
+
+**Checking the facts**
+- **Sources the AI really read:** every page a web search returned or an assistant opened is recorded. A brief's news items and sources, or a dossier's quotes, that point to a page nobody opened are removed (they are likely invented). A draft citing such a page gets a "no assistant actually opened this page" warning.
+- **Claims must match their source:** a claim citing a knowledge-base document must actually be in it (its figures, or most of its words); otherwise the draft is flagged.
+- **Every customer-facing draft is graded:** call follow-ups, deal-strategy emails and marketing content (with a content rubric) get a score and warnings too. Facts the grader can't find in the evidence are flagged. If grading fails, the draft is marked "not graded" instead of being lost.
+- **Better knowledge search:** word forms match ("forecasting" finds "forecasts"), long documents are split sensibly with overlap, weak matches are dropped, and a fast model re-ranks the top matches (`KB_RERANK`).
+- **Fresh research:** briefs older than `BRIEF_MAX_AGE_DAYS` and dossiers older than `DOSSIER_MAX_AGE_DAYS` are refreshed before a sequence is written.
+
+**Daily work**
+- **My day:** past-SLA leads, hot replies, tasks due, drafts waiting and the next 48 hours of customer meetings on one page. Call Analyst next steps and Deal Strategist actions become tasks automatically.
+- **Booking link:** set `BOOKING_URL` and replies to interested prospects offer it.
+- **UTM tags:** links to your own site in sent emails and approved content carry `utm_source=revenueos`, the medium, campaign and draft id.
+- **Funnel and SLA:** contacts move lead → MQL → SQL → opportunity → customer automatically (`MQL_SCORE`). Insights shows the funnel and how often MQLs get a human touch within `MQL_SLA_HOURS`.
+
+**Measured quality**
+- **Prompt versions:** every assistant's instructions are versioned automatically (`prompt_versions`); runs and drafts record the version, and Insights compares draft quality by version. Admins add workspace-specific instructions per assistant on **AI governance**.
+- **Learning loop v2:** learns from sent emails and outcomes **and** from how reviewers edited and why they rejected drafts. A new playbook is a **proposal** until an admin approves it on Insights; the previous version can be restored with one click. Needs `LEARN_MIN_SENT` (50) sends and `LEARN_MIN_REPLIES` (10) replies.
+- **Grader check:** Insights shows whether high personalisation scores really get sent unedited more often than low ones.
+- **Evals:** `python -m evals.run` runs the real assistants on golden cases (lead scoring, reply triage, the grader, a full sequence with an AI judge) in a throwaway database and fails when a suite drops below `evals/baseline.json`. CI (`.github/workflows/ci.yml`) runs the tests and type-check on every push and the evals on demand or on PRs labelled `prompt-change`.
+
+**Sales management** (**Sales setup** page)
+- **Territories and routing:** new leads get an owner automatically, by country, industry and size, round-robin within the territory; a lead at an account that already has an owner goes to that owner.
+- **Quotas:** per rep per quarter; Insights shows attainment, pipeline closing this quarter, coverage and win rate per rep.
+- **Win/loss:** closing a deal requires a reason; competitors mentioned on calls are recorded on the deal. Insights shows why you win and lose, overall and per competitor, and the Deal Strategist sees your record against the competitors in each deal.
+- **Products and line items:** a price list, line items on deals (the amount follows), and proposals that quote only those products and prices.
+
+**Data and nurture**
+- **Enrichment** (`ENRICHMENT_PROVIDER=apollo`): fills only empty fields, every scheduler tick and on demand (**Enrich** on a lead).
+- **Email verification** (`zerobounce` / `neverbounce`): checked before the first email (cached 90 days). Invalid addresses are blocked, risky ones warned. Malformed addresses are always blocked.
+- **Nurture** (**Nurture** page): email series approved once per step, sent to every member in business hours with merge fields; members leave when they become an MQL, reply or opt out.
+- **Multi-touch attribution:** first touch, last touch, linear and W-shaped credit for every deal on Insights.
+
+**Reach and customers**
+- **Website visits:** put the snippet from **Market intel** on your site. Visitors who came from one of our emails are recognised; viewing pricing, demo or contact pages (`INTENT_PAGES`) creates a buying signal and counts as engagement. The Lead Scorer sees recent signals.
+- **Intent data:** Bombora, G2, 6sense and others via `POST /api/webhooks/intent` or a CSV upload. Medium and strong topic surges become signals; strong ones on unknown companies can create the account (`INTENT_CREATE_ACCOUNTS`).
+- **Events and webinars** (**Events** page): registrants become leads; after the event, attendees and no-shows go into different nurture series and engaged attendees become tasks.
+- **Customers** (**Customers** page): won deals with recurring products become contracts; renewal deals and tasks open `RENEWAL_LEAD_DAYS` before the end; a health score raises churn-risk signals; upsell ideas list products the customer doesn't have.
+- **LinkedIn publishing:** approved LinkedIn posts get a **Publish to LinkedIn** button (company page). Ad spend per campaign (entered or imported from Campaign Manager / Google Ads CSV) shows cost per meeting and ROI on Insights.
+
+**Running it safely**
+- **Notifications:** hot replies go straight to the owner (Slack DM or email), MQLs waiting past the SLA alert their owner once, each rep gets a morning digest (`DIGEST_HOUR`), and failed sends or jobs alert the team (`ALERT_EMAIL`, Slack).
+- **Approvals at scale:** bulk approve or reject, oldest-first sorting and waiting time on each draft.
+- **Activity log** page: every assistant run and job with its steps, time, cost and errors. Every response carries `X-Request-ID`; `SENTRY_DSN` turns on error tracking.
+- **Sign-in:** two-factor sign-in (authenticator apps), lockout after 5 failed attempts, admin password reset, and single sign-on with any OpenID Connect provider. `python -m revenueos.rotate_keys` re-encrypts stored secrets after changing `SECRET_KEY`.
+- **Privacy:** a personal one-click unsubscribe link in every email (and `List-Unsubscribe-Post`), lawful basis per contact (required in `CONSENT_REQUIRED_COUNTRIES`), data export and erasure on **Settings**, and automatic clean-up of AI run logs and rejected drafts.
+- **Dependencies:** `backend/requirements.lock` pins the exact versions this release was tested with.
 
 **Personalisation gate:** every email and LinkedIn draft is scored 0–100 by a grader against the brief and relationship history. Below `PERSONALISATION_THRESHOLD` (default 60) the writer gets specific feedback and rewrites once. If the rewrite is still below, it is queued with a warning. The score and the facts it used are shown in Approvals.
 
@@ -204,7 +251,29 @@ Start with a sandbox org.
 | `GET/POST /api/leads`, `GET /api/leads/{id}` | Pipeline |
 | `POST /api/leads/{id}/score \| research \| sequence` | Run one agent (returns `run_id`) |
 | `POST /api/leads/batch-outbound {contact_ids}` | Outbound workflow |
-| `GET /api/approvals?status=pending`, `POST /api/approvals/{id}/approve \| reject` | Human review |
+| `GET /api/approvals?status=pending`, `POST /api/approvals/{id}/approve \| reject` | Human review. The reviewer is the signed-in user; reject takes a `reason` from `GET /api/approvals/reject-reasons`. Edits keep the AI original (`ai_subject`, `ai_body`, `edit_pct`) |
+| `GET /api/enrollments?contact_id=`, `POST /api/enrollments/{id}/pause \| resume \| stop`, `PUT /api/leads/{id}/timezone` | Sequences |
+| `GET/POST /api/tasks`, `PATCH /api/tasks/{id}` | Tasks (calls, LinkedIn steps, next steps) |
+| `POST /api/webhooks/email/sendgrid \| postmark` | Delivery events: bounces, complaints, unsubscribes, opens, clicks |
+| `GET /api/my-day?mine=` | My day: SLA breaches, hot replies, tasks due, drafts waiting, meetings |
+| `GET /api/insights/funnel` | Lifecycle funnel and MQL response-time SLA |
+| `GET /api/insights/playbook/versions`, `POST /api/insights/playbook/{id}/approve \| reject`, `POST /api/insights/playbook/rollback` | Playbook proposals, publishing, rollback (admin) |
+| `PUT /api/governance/{agent}/prompt`, `GET /api/governance/prompts` | Workspace prompt additions and prompt version history |
+| `GET/POST/PUT/DELETE /api/territories`, `POST /api/routing/run`, `PUT /api/leads/{id}/owner` | Territories and lead routing |
+| `GET/PUT /api/quotas`, `GET /api/insights/reps`, `GET /api/insights/win-loss`, `GET /api/deals/close-reasons` | Quotas, rep performance, win/loss |
+| `GET/POST/PUT /api/products`, `GET/POST /api/deals/{id}/lines`, `DELETE /api/deals/{id}/lines/{line}` | Price list and deal line items |
+| `GET/POST /api/nurture`, `POST /api/nurture/{id}/steps \| enroll \| pause \| resume` | Nurture series |
+| `POST /api/leads/{id}/enrich \| verify-email`, `GET /api/data/providers` | Enrichment and email verification |
+| `GET /api/insights/attribution/multi-touch` | Multi-touch attribution |
+| `POST /api/approvals/bulk`, `GET /api/approvals?order=oldest` | Bulk approve/reject, waiting time |
+| `POST /api/auth/mfa/setup \| enable \| disable`, `GET /api/auth/oidc/start`, `POST /api/workspace/users/{id}/password` | Two-factor, SSO, password reset |
+| `PUT /api/leads/{id}/lawful-basis`, `POST /api/privacy/export \| erase`, `GET/POST /api/public/unsubscribe` | Privacy |
+| `GET /api/public/t.js`, `POST /api/public/track`, `GET /api/visits`, `GET /api/tracking/snippet` | Website visit tracking |
+| `POST /api/webhooks/intent`, `POST /api/intel/intent/import` | Intent data |
+| `GET/POST/PUT /api/events`, `POST /api/events/{id}/registrations \| attendance \| follow-up`, `POST /api/webhooks/event-registration` | Events and webinars |
+| `GET /api/customers`, `POST/PUT /api/contracts`, `POST /api/customers/renewals/run` | Customers, renewals, health |
+| `POST /api/approvals/{id}/publish`, `POST /api/campaigns/{id}/spend`, `POST /api/campaigns/{id}/spend/import` | LinkedIn publishing, ad spend |
+| `GET /api/insights/quality` | Draft accuracy: approved-without-edits rate, average edit size, reject reasons, per assistant |
 | `GET/POST /api/kb`, `POST /api/kb/upload`, `GET /api/kb/search?q=` | Knowledge base |
 | `POST /api/webhooks/inbound \| reply \| unsubscribe` | Website forms and email provider events (`X-Webhook-Secret` header) |
 | `POST /api/leads/{id}/meeting-prep \| call-analysis \| proposal` | Deal-stage agents (return `run_id`) |
@@ -247,6 +316,21 @@ Interactive docs: http://localhost:8000/docs
 - Set `BRAND_COLOR` (hex) for decks and proposals, or load your own templates in `tools/docgen.py`.
 - Send from a warmed-up domain with SPF, DKIM and DMARC configured.
 - Have marketing or legal approve every case study in the knowledge base.
+
+## Running more than one server process
+
+Safe by design: each workspace's scheduled work runs only in the process holding its scheduler lease, and every send first claims the draft with one conditional update, so a follow-up can never go out twice. If a process dies mid-send, the draft is marked **failed** for a person to check (never resent automatically). Runs stuck as "running" for over two hours are marked failed.
+
+## Database migrations
+
+Schema changes beyond new nullable columns go in Alembic revisions (`backend/migrations/versions`). Every workspace database is upgraded on startup; existing databases are stamped at the baseline first.
+
+```bash
+cd backend
+python -m revenueos.migrations revision -m "describe the change"   # autogenerate against the default DB
+python -m revenueos.migrations upgrade                            # all workspaces
+python -m revenueos.migrations current
+```
 
 ## Tests
 

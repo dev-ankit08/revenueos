@@ -56,6 +56,23 @@ class Contact(Base):
     score_reason: Mapped[str | None] = mapped_column(Text)
     score_tier: Mapped[str | None] = mapped_column(String(1))  # A|B|C|D
     owner: Mapped[str | None] = mapped_column(String(120))
+    # IANA time zone, e.g. "Europe/Berlin". Sequences send inside business hours in this zone.
+    timezone: Mapped[str | None] = mapped_column(String(64))
+    # Funnel stage (services/lifecycle.py): lead -> mql -> sql -> opportunity -> customer.
+    lifecycle: Mapped[str | None] = mapped_column(String(20), index=True)
+    lifecycle_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    mql_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Data providers: when enrichment last ran, and the cached email verification result.
+    enriched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    email_status: Mapped[str | None] = mapped_column(String(10))  # valid|invalid|risky|unknown
+    email_status_detail: Mapped[str | None] = mapped_column(String(120))
+    email_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Privacy: why we may contact them (consent|legitimate_interest|contract), where it came from, and when.
+    lawful_basis: Mapped[str | None] = mapped_column(String(24))
+    consent_source: Mapped[str | None] = mapped_column(String(255))
+    consent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sla_alerted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    first_touch_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # first rep touch after MQL
     inbound_message: Mapped[str | None] = mapped_column(Text)
     # Lift measurement: "treatment" gets AI outreach, "holdout" is randomly held back.
     experiment_group: Mapped[str | None] = mapped_column(String(10))
@@ -83,6 +100,8 @@ class AccountBrief(Base):
     relevant_proof_points: Mapped[list] = mapped_column(JSON, default=list)
     likely_objections: Mapped[list] = mapped_column(JSON, default=list)
     sources: Mapped[list] = mapped_column(JSON, default=list)
+    # Sources the researcher listed but never actually opened or found in a search (possible hallucinations).
+    unverified_sources: Mapped[list | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     account: Mapped[Account] = relationship(back_populates="briefs")
@@ -142,11 +161,116 @@ class Approval(Base):
     run_id: Mapped[int | None] = mapped_column(ForeignKey("agent_runs.id"))
     reviewed_by: Mapped[str | None] = mapped_column(String(120))
     review_note: Mapped[str | None] = mapped_column(Text)
+    # Structured reason on reject (see services/approvals.REJECT_REASONS); feeds the learning loop.
+    reject_reason: Mapped[str | None] = mapped_column(String(30))
+    # Grounding the draft was checked against when queued (brief, dossier, history...), so the
+    # re-check at approval uses the same evidence instead of the knowledge base alone.
+    grounding_extra: Mapped[str | None] = mapped_column(Text)
+    # The AI's original wording, kept when a reviewer edits; edit_pct = how much they changed (0-100).
+    ai_subject: Mapped[str | None] = mapped_column(String(255))
+    ai_body: Mapped[str | None] = mapped_column(Text)
+    edit_pct: Mapped[int | None] = mapped_column(Integer)
+    # Sequences: which enrollment this step belongs to, and when the engine plans to send it.
+    enrollment_id: Mapped[int | None] = mapped_column(ForeignKey("enrollments.id"), index=True)
+    scheduled_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Set when a worker claims the draft for sending (status "sending"); guards against double sends.
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    provider: Mapped[str | None] = mapped_column(String(20))  # smtp|sendgrid|postmark|dry_run
+    provider_message_id: Mapped[str | None] = mapped_column(String(255), index=True)
+    prompt_version: Mapped[str | None] = mapped_column(String(16), index=True)  # of the agent run that wrote it
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # social posts published by RevenueOS
+    published_url: Mapped[str | None] = mapped_column(String(500))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     contact: Mapped[Contact | None] = relationship()
+
+
+class AuditEvent(Base):
+    """Who did what: approvals, rejections, edits and admin changes. Append-only."""
+
+    __tablename__ = "audit_events"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    actor: Mapped[str] = mapped_column(String(255))
+    action: Mapped[str] = mapped_column(String(60), index=True)  # approval.approve|approval.reject|governance.update...
+    object_type: Mapped[str | None] = mapped_column(String(40))
+    object_id: Mapped[str | None] = mapped_column(String(60), index=True)
+    detail: Mapped[dict | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class Enrollment(Base):
+    """One contact working through one outreach sequence. Steps are Approvals (email/LinkedIn) and Tasks
+    (calls, manual steps) sharing `enrollment_id`; services/sequences.py moves it forward."""
+
+    __tablename__ = "enrollments"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    contact_id: Mapped[int] = mapped_column(ForeignKey("contacts.id"), index=True)
+    status: Mapped[str] = mapped_column(String(20), default="active", index=True)
+    # active|paused|completed|stopped
+    paused_reason: Mapped[str | None] = mapped_column(String(255))
+    resume_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by_agent: Mapped[str | None] = mapped_column(String(60))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # first step sent
+    next_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    contact: Mapped[Contact] = relationship()
+
+
+class Task(Base):
+    """A to-do for a person: a call step in a sequence, a LinkedIn message to send, a deal next step."""
+
+    __tablename__ = "tasks"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    type: Mapped[str] = mapped_column(String(20), default="other")  # call|linkedin|email|follow_up|prep|other
+    title: Mapped[str] = mapped_column(String(255))
+    notes: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), default="open", index=True)  # open|done|skipped
+    owner: Mapped[str | None] = mapped_column(String(120))
+    contact_id: Mapped[int | None] = mapped_column(ForeignKey("contacts.id"), index=True)
+    opportunity_id: Mapped[int | None] = mapped_column(ForeignKey("opportunities.id"))
+    enrollment_id: Mapped[int | None] = mapped_column(ForeignKey("enrollments.id"), index=True)
+    approval_id: Mapped[int | None] = mapped_column(ForeignKey("approvals.id"))
+    sequence_step: Mapped[int | None] = mapped_column(Integer)
+    offset_days: Mapped[int | None] = mapped_column(Integer)  # days after the first touch (sequence steps)
+    due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    created_by: Mapped[str | None] = mapped_column(String(60))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    outcome: Mapped[str | None] = mapped_column(Text)
+
+    contact: Mapped[Contact | None] = relationship()
+
+
+class EmailEvent(Base):
+    """Delivery events from the sending service: delivered, open, click, bounce, complaint, unsubscribe."""
+
+    __tablename__ = "email_events"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    provider: Mapped[str] = mapped_column(String(20))
+    event: Mapped[str] = mapped_column(String(20), index=True)
+    email: Mapped[str | None] = mapped_column(String(255), index=True)
+    approval_id: Mapped[int | None] = mapped_column(ForeignKey("approvals.id"), index=True)
+    contact_id: Mapped[int | None] = mapped_column(ForeignKey("contacts.id"), index=True)
+    url: Mapped[str | None] = mapped_column(Text)
+    detail: Mapped[str | None] = mapped_column(Text)
+    dedupe_key: Mapped[str | None] = mapped_column(String(255), unique=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class SchedulerLease(Base):
+    """Only the worker holding a lease runs that workspace's scheduled work, so several server processes
+    never send the same follow-up twice. `state` keeps scheduler bookkeeping across restarts."""
+
+    __tablename__ = "scheduler_leases"
+    name: Mapped[str] = mapped_column(String(60), primary_key=True)
+    holder: Mapped[str] = mapped_column(String(120))
+    expires_epoch: Mapped[float] = mapped_column(Float)
+    state: Mapped[dict | None] = mapped_column(JSON)
 
 
 class Suppression(Base):
@@ -176,8 +300,23 @@ class AgentRun(Base):
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
     cache_read_tokens: Mapped[int] = mapped_column(Integer, default=0)
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    # Pages this run actually searched or opened (web_search / web_fetch results, citations).
+    source_urls: Mapped[list | None] = mapped_column(JSON)
+    prompt_version: Mapped[str | None] = mapped_column(String(16), index=True)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class SeenSource(Base):
+    """Every web page an assistant really found or opened. A cited URL that is not here was never seen."""
+
+    __tablename__ = "seen_sources"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    url_key: Mapped[str] = mapped_column(String(512), unique=True)  # normalised (services/sources.py)
+    url: Mapped[str] = mapped_column(Text)
+    run_id: Mapped[int | None] = mapped_column(ForeignKey("agent_runs.id"))
+    agent: Mapped[str | None] = mapped_column(String(60))
+    first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class Activity(Base):
@@ -212,6 +351,12 @@ class Opportunity(Base):
     win_probability: Mapped[float | None] = mapped_column(Float)  # 0-100, from the Deal Strategist
     forecast_category: Mapped[str | None] = mapped_column(String(12))  # commit|best_case|pipeline|omitted
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    owner: Mapped[str | None] = mapped_column(String(120), index=True)  # rep's email or name
+    deal_type: Mapped[str | None] = mapped_column(String(12))  # new | renewal | upsell
+    # Why it was won or lost (services/salesmgmt.CLOSE_REASONS) and who we were up against.
+    close_reason: Mapped[str | None] = mapped_column(String(40))
+    close_reason_detail: Mapped[str | None] = mapped_column(Text)
+    competitors: Mapped[list | None] = mapped_column(JSON)
     last_activity_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -403,6 +548,7 @@ class PersonProfile(Base):
     talking_points: Mapped[list] = mapped_column(JSON, default=list)
     communication_style: Mapped[str | None] = mapped_column(Text)
     sources: Mapped[list] = mapped_column(JSON, default=list)
+    unverified_sources: Mapped[list | None] = mapped_column(JSON)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -416,7 +562,200 @@ class AgentSetting(Base):
     monthly_budget_usd: Mapped[float | None] = mapped_column(Float)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     alerted_month: Mapped[str | None] = mapped_column(String(7))  # "2026-10": 80% warning already sent
+    # Extra instructions this workspace adds to the agent's built-in prompt (e.g. "never mention pricing").
+    prompt_addendum: Mapped[str | None] = mapped_column(Text)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Territory(Base):
+    """Routing rules: leads matching a territory go to its members in turn (round-robin).
+    Territories are checked by priority (lowest first); one with no rules catches everything else."""
+
+    __tablename__ = "territories"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(120))
+    priority: Mapped[int] = mapped_column(Integer, default=100)
+    countries: Mapped[list | None] = mapped_column(JSON)  # ["DE", "Germany", ...] (case-insensitive)
+    industries: Mapped[list | None] = mapped_column(JSON)  # substrings, e.g. ["manufactur", "automotive"]
+    min_employees: Mapped[int | None] = mapped_column(Integer)
+    max_employees: Mapped[int | None] = mapped_column(Integer)
+    members: Mapped[list] = mapped_column(JSON, default=list)  # rep emails
+    next_index: Mapped[int] = mapped_column(Integer, default=0)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class Quota(Base):
+    __tablename__ = "quotas"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    owner: Mapped[str] = mapped_column(String(120), index=True)
+    period: Mapped[str] = mapped_column(String(10), index=True)  # "2026-Q4"
+    amount: Mapped[float] = mapped_column(Float)
+
+
+class Product(Base):
+    """What you sell, with list prices, so proposals and deal amounts use real numbers."""
+
+    __tablename__ = "products"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(255))
+    sku: Mapped[str | None] = mapped_column(String(64), unique=True)
+    description: Mapped[str | None] = mapped_column(Text)
+    unit_price: Mapped[float] = mapped_column(Float)
+    currency: Mapped[str] = mapped_column(String(3), default="USD")
+    billing: Mapped[str] = mapped_column(String(12), default="one_time")  # one_time|monthly|annual
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class OpportunityLine(Base):
+    __tablename__ = "opportunity_lines"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    opportunity_id: Mapped[int] = mapped_column(ForeignKey("opportunities.id"), index=True)
+    product_id: Mapped[int | None] = mapped_column(ForeignKey("products.id"))
+    description: Mapped[str | None] = mapped_column(String(255))
+    quantity: Mapped[float] = mapped_column(Float, default=1)
+    unit_price: Mapped[float] = mapped_column(Float)
+    discount_pct: Mapped[float] = mapped_column(Float, default=0)
+
+    product: Mapped["Product | None"] = relationship()
+
+    @property
+    def total(self) -> float:
+        return round(self.quantity * self.unit_price * (1 - (self.discount_pct or 0) / 100), 2)
+
+
+class NurtureFlow(Base):
+    """A marketing email series sent to many contacts; each step's template is approved once (services/nurture.py)."""
+
+    __tablename__ = "nurture_flows"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(255))
+    campaign_id: Mapped[int | None] = mapped_column(ForeignKey("campaigns.id"))
+    status: Mapped[str] = mapped_column(String(12), default="active")  # active|paused
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    steps: Mapped[list["NurtureStep"]] = relationship(cascade="all, delete-orphan")
+    members: Mapped[list["NurtureMember"]] = relationship(cascade="all, delete-orphan")
+
+
+class NurtureStep(Base):
+    __tablename__ = "nurture_steps"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    flow_id: Mapped[int] = mapped_column(ForeignKey("nurture_flows.id"), index=True)
+    position: Mapped[int] = mapped_column(Integer)
+    delay_days: Mapped[int] = mapped_column(Integer, default=7)
+    approval_id: Mapped[int | None] = mapped_column(ForeignKey("approvals.id"))  # the template
+
+
+class NurtureMember(Base):
+    __tablename__ = "nurture_members"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    flow_id: Mapped[int] = mapped_column(ForeignKey("nurture_flows.id"), index=True)
+    contact_id: Mapped[int] = mapped_column(ForeignKey("contacts.id"), index=True)
+    status: Mapped[str] = mapped_column(String(12), default="active")  # active|completed|exited
+    current_position: Mapped[int] = mapped_column(Integer, default=0)  # steps already sent
+    last_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    exit_reason: Mapped[str | None] = mapped_column(String(255))
+    enrolled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    contact: Mapped[Contact] = relationship()
+
+
+class WebVisit(Base):
+    """A page view on your website (tracking script). Identified as a contact when they came from our email."""
+
+    __tablename__ = "web_visits"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    visitor_id: Mapped[str] = mapped_column(String(64), index=True)
+    contact_id: Mapped[int | None] = mapped_column(ForeignKey("contacts.id"), index=True)
+    account_id: Mapped[int | None] = mapped_column(ForeignKey("accounts.id"), index=True)
+    url: Mapped[str] = mapped_column(Text)
+    path: Mapped[str] = mapped_column(String(500))
+    referrer: Mapped[str | None] = mapped_column(Text)
+    utm_source: Mapped[str | None] = mapped_column(String(120))
+    utm_campaign: Mapped[str | None] = mapped_column(String(120))
+    approval_id: Mapped[int | None] = mapped_column(Integer)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class Event(Base):
+    """A webinar, conference or meetup: registrations, attendance and the follow-up after it."""
+
+    __tablename__ = "events"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(255))
+    kind: Mapped[str] = mapped_column(String(20), default="webinar")  # webinar|conference|meetup|other
+    starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    url: Mapped[str | None] = mapped_column(String(1000))
+    external_id: Mapped[str | None] = mapped_column(String(120), index=True)  # e.g. the Zoom webinar id
+    campaign_id: Mapped[int | None] = mapped_column(ForeignKey("campaigns.id"))
+    attended_flow_id: Mapped[int | None] = mapped_column(ForeignKey("nurture_flows.id"))
+    noshow_flow_id: Mapped[int | None] = mapped_column(ForeignKey("nurture_flows.id"))
+    status: Mapped[str] = mapped_column(String(12), default="upcoming")  # upcoming|completed
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    registrations: Mapped[list["EventRegistration"]] = relationship(cascade="all, delete-orphan")
+
+
+class EventRegistration(Base):
+    __tablename__ = "event_registrations"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    event_id: Mapped[int] = mapped_column(ForeignKey("events.id"), index=True)
+    contact_id: Mapped[int] = mapped_column(ForeignKey("contacts.id"), index=True)
+    status: Mapped[str] = mapped_column(String(12), default="registered")  # registered|attended|no_show
+    attended_minutes: Mapped[int | None] = mapped_column(Integer)
+    questions: Mapped[str | None] = mapped_column(Text)
+    source: Mapped[str | None] = mapped_column(String(40))
+    followed_up: Mapped[bool] = mapped_column(Boolean, default=False)
+    registered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    contact: Mapped[Contact] = relationship()
+
+
+class Contract(Base):
+    """What a customer has bought and when it renews."""
+
+    __tablename__ = "contracts"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"), index=True)
+    opportunity_id: Mapped[int | None] = mapped_column(ForeignKey("opportunities.id"))
+    name: Mapped[str] = mapped_column(String(255))
+    amount: Mapped[float | None] = mapped_column(Float)
+    currency: Mapped[str] = mapped_column(String(3), default="USD")
+    start_date: Mapped[str | None] = mapped_column(String(10))
+    end_date: Mapped[str | None] = mapped_column(String(10), index=True)
+    auto_renew: Mapped[bool] = mapped_column(Boolean, default=False)
+    products: Mapped[list | None] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(12), default="active")  # active|renewed|churned|expired
+    renewal_opportunity_id: Mapped[int | None] = mapped_column(ForeignKey("opportunities.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    account: Mapped[Account] = relationship()
+
+
+class CampaignSpend(Base):
+    """Paid media spend per campaign and day (from ad platforms, CSV, or entered by hand)."""
+
+    __tablename__ = "campaign_spend"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    campaign_id: Mapped[int] = mapped_column(ForeignKey("campaigns.id"), index=True)
+    day: Mapped[str] = mapped_column(String(10))
+    channel: Mapped[str] = mapped_column(String(40), default="other")  # linkedin_ads|google_ads|events|other
+    amount: Mapped[float] = mapped_column(Float)
+    impressions: Mapped[int | None] = mapped_column(Integer)
+    clicks: Mapped[int | None] = mapped_column(Integer)
+
+
+class PromptVersion(Base):
+    """Every distinct system prompt an agent has run with (built-in prompt + workspace addendum), by hash.
+    Runs and drafts record the version, so quality can be compared before and after a prompt change."""
+
+    __tablename__ = "prompt_versions"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    agent: Mapped[str] = mapped_column(String(60), index=True)
+    version: Mapped[str] = mapped_column(String(16), unique=True)
+    text: Mapped[str] = mapped_column(Text)
+    first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 # --------------------------------------------------------------------------- platform (default database only)
@@ -448,6 +787,11 @@ class User(ControlBase):
     role: Mapped[str] = mapped_column(String(12), default="member")  # owner (platform) | admin | member
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Two-factor sign-in (TOTP secret stored encrypted) and lockout after repeated failures.
+    totp_secret: Mapped[str | None] = mapped_column(Text)
+    mfa_enabled: Mapped[bool | None] = mapped_column(Boolean, default=False)
+    failed_logins: Mapped[int | None] = mapped_column(Integer, default=0)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class AuthSession(ControlBase):

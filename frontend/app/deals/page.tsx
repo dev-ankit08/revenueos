@@ -19,7 +19,21 @@ export default function Deals() {
   const load = () => api("/api/deals").then(setDeals).catch((e) => setError(e.message));
   useEffect(() => { load(); }, []);
 
-  async function patch(id: number, body: object) {
+  const [reasons, setReasons] = useState<{ won: string[]; lost: string[] }>({ won: [], lost: [] });
+  useEffect(() => { api("/api/deals/close-reasons").then(setReasons).catch(() => {}); }, []);
+
+  async function patch(id: number, body: any) {
+    setError("");
+    if (body.stage === "closed_won" || body.stage === "closed_lost") {
+      const options = body.stage === "closed_won" ? reasons.won : reasons.lost;
+      const picked = prompt(`Why was it ${body.stage === "closed_won" ? "won" : "lost"}? Type one of:\n${options.join(", ")}`);
+      if (!picked) return;
+      body.close_reason = picked.trim();
+      if (body.stage === "closed_lost") {
+        const who = prompt("Lost to which competitor? (optional)");
+        if (who) body.competitors = [who.trim()];
+      }
+    }
     try {
       await api(`/api/deals/${id}`, { method: "PATCH", body: JSON.stringify(body) });
       load();

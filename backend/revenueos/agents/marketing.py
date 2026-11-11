@@ -11,8 +11,8 @@ from sqlalchemy import select
 
 from ..config import settings
 from ..db import session_scope
-from ..models import Account, Activity, Campaign, CampaignMember, Contact, SalesDocument
-from ..services import approvals, memory
+from ..models import Account, Activity, Approval, Campaign, CampaignMember, Contact, SalesDocument
+from ..services import approvals, memory, personalisation
 from ..tools.crm import get_crm
 from . import researcher
 from .base import WEB_TOOLS, new_run, run_agent
@@ -60,8 +60,12 @@ def make_content_tool(run_id: int, grounding: str, agent_name: str,
                 rationale=rationale, created_by_agent=agent_name, run_id=run_id, grounding_extra=grounding,
                 campaign_id=campaign_id, account_id=account_id, claims=[c.model_dump() for c in claims or []],
             )
-            flags, aid = a.guardrail_flags, a.id
-        return f"Queued as approval {aid}" + (f" with reviewer notes: {flags}" if flags else ".")
+            aid = a.id
+        score = await personalisation.grade_approval(aid, grounding, parent_run_id=run_id)
+        with session_scope() as db:
+            flags = db.get(Approval, aid).guardrail_flags
+        return (f"Queued as approval {aid}" + (f" (quality {score}/100)" if score is not None else "")
+                + (f" with reviewer notes: {flags}" if flags else "."))
 
     return queue_content
 

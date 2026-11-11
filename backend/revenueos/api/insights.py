@@ -1,5 +1,5 @@
 """Phase 4 endpoints: deal reviews, forecast, attribution, A/B results, learning loop."""
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -10,7 +10,9 @@ from ..agents import strategy
 from ..config import settings
 from ..db import get_db
 from ..models import KBDocument, Opportunity, SalesDocument
+from ..services import approvals as approvals_svc
 from ..services import governance, insights
+from .workspace import caller, require_admin
 
 router = APIRouter(prefix="/api", tags=["insights"])
 
@@ -88,8 +90,10 @@ def ab_tests(db: Session = Depends(get_db)):
 def learn():
     async def work(run_id: int) -> str:
         r = await strategy.learn_from_results(parent_run_id=run_id)
-        return (f"Playbook updated from {r['emails_analysed']} emails (confidence {r['confidence']})"
-                if r["updated"] else r["reason"])
+        if not r.get("drafted"):
+            return r["reason"]
+        return (f"Playbook {'published' if r['updated'] else 'proposed for review'} from {r['emails_analysed']} "
+                f"emails (confidence {r['confidence']})")
     return {"run_id": jobs.start("job:learning", "Learn from outreach results", work)}
 
 
@@ -97,6 +101,74 @@ def learn():
 def playbook(db: Session = Depends(get_db)):
     d = db.scalar(select(KBDocument).where(KBDocument.title == strategy.PLAYBOOK_TITLE))
     return {"content": d.content, "updated_at": d.created_at} if d else {}
+
+
+@router.get("/insights/playbook/versions")
+def playbook_versions(db: Session = Depends(get_db)):
+    """Proposals (draft), the live version (published) and history, newest first."""
+    return strategy.playbook_versions(db)
+
+
+def _who(request: Request) -> str:
+    user = caller(request).get("user")
+    return (user.get("name") or user.get("email")) if isinstance(user, dict) else str(user or "anonymous")
+
+
+@router.post("/insights/playbook/{doc_id}/approve", dependencies=[Depends(require_admin)])
+def approve_playbook(doc_id: int, request: Request, db: Session = Depends(get_db)):
+    try:
+        out = strategy.publish_playbook(doc_id, _who(request))
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+    approvals_svc.audit(db, _who(request), "playbook.publish", "playbook", doc_id)
+    db.commit()
+    return out
+
+
+@router.post("/insights/playbook/{doc_id}/reject", dependencies=[Depends(require_admin)])
+def reject_playbook(doc_id: int, request: Request, db: Session = Depends(get_db)):
+    strategy.reject_playbook(doc_id, _who(request))
+    approvals_svc.audit(db, _who(request), "playbook.reject", "playbook", doc_id)
+    db.commit()
+    return {"document_id": doc_id, "status": "rejected"}
+
+
+@router.post("/insights/playbook/rollback", dependencies=[Depends(require_admin)])
+def rollback_playbook(request: Request, db: Session = Depends(get_db)):
+    try:
+        out = strategy.rollback_playbook(_who(request))
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
+    approvals_svc.audit(db, _who(request), "playbook.rollback", "playbook", out.get("document_id"))
+    db.commit()
+    return out
+
+
+class PromptAddendumIn(BaseModel):
+    text: str | None = None
+
+
+@router.put("/governance/{agent}/prompt", dependencies=[Depends(require_admin)])
+def set_prompt(agent: str, body: PromptAddendumIn, request: Request, db: Session = Depends(get_db)):
+    """Workspace-specific instructions added to an agent's built-in prompt. Versioned automatically."""
+    try:
+        governance.set_prompt_addendum(agent, body.text)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+    approvals_svc.audit(db, _who(request), "governance.prompt", "agent", agent, text=body.text)
+    db.commit()
+    return {"agent": agent, "prompt_addendum": governance.prompt_addendum(agent)}
+
+
+@router.get("/governance/prompts")
+def prompt_history(agent: str | None = None, db: Session = Depends(get_db)):
+    from ..models import PromptVersion
+
+    stmt = select(PromptVersion).order_by(PromptVersion.id.desc()).limit(100)
+    if agent:
+        stmt = stmt.where(PromptVersion.agent == agent)
+    return [{"agent": p.agent, "version": p.version, "first_seen": p.first_seen, "text": p.text}
+            for p in db.scalars(stmt)]
 
 
 @router.get("/insights/lift")
@@ -117,14 +189,39 @@ class GovernanceIn(BaseModel):
     enabled: bool = True
 
 
-@router.put("/governance/{agent}")
-def governance_update(agent: str, body: GovernanceIn):
-    """agent "*" sets the total monthly AI budget."""
+@router.put("/governance/{agent}", dependencies=[Depends(require_admin)])
+def governance_update(agent: str, body: GovernanceIn, request: Request, db: Session = Depends(get_db)):
+    """agent "*" sets the total monthly AI budget. Admins only."""
     try:
         governance.update(agent, model=body.model, monthly_budget_usd=body.monthly_budget_usd, enabled=body.enabled)
     except ValueError as exc:
         raise HTTPException(422, str(exc))
+    user = caller(request).get("user")
+    actor = (user.get("name") or user.get("email")) if isinstance(user, dict) else str(user or "anonymous")
+    approvals_svc.audit(db, actor, "governance.update", "agent", agent, **body.model_dump())
+    db.commit()
     return governance.overview()
+
+
+@router.get("/insights/attribution/multi-touch")
+def multi_touch(db: Session = Depends(get_db)):
+    return insights.multi_touch_attribution(db)
+
+
+@router.get("/insights/funnel")
+def funnel(db: Session = Depends(get_db)):
+    """Contacts per lifecycle stage and how often MQLs get a human touch within the SLA."""
+    from ..services import lifecycle
+
+    lifecycle.refresh_all(db)
+    db.commit()
+    return lifecycle.funnel(db)
+
+
+@router.get("/insights/quality")
+def draft_quality(db: Session = Depends(get_db)):
+    """How much reviewers trust the drafts: approved-without-edits rate, edit size, reject reasons."""
+    return insights.draft_quality(db)
 
 
 # ------------------------------------------------------------------ pilot report

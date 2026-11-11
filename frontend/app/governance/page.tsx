@@ -81,6 +81,37 @@ export default function Governance() {
           })}
         </tbody>
       </table>
+      <PromptAdditions agents={data.agents} onSaved={load} />
+    </>
+  );
+}
+
+function PromptAdditions({ agents, onSaved }: { agents: any[]; onSaved: () => void }) {
+  const [agent, setAgent] = useState(agents[0]?.agent ?? "");
+  const current = agents.find((a) => a.agent === agent);
+  const [text, setText] = useState(current?.prompt_addendum ?? "");
+  const [msg, setMsg] = useState("");
+  useEffect(() => { setText(current?.prompt_addendum ?? ""); setMsg(""); }, [agent]);
+
+  async function save() {
+    try {
+      await api(`/api/governance/${agent}/prompt`, { method: "PUT", body: JSON.stringify({ text }) });
+      setMsg("Saved. Each change is versioned, and Insights compares draft quality by version.");
+      onSaved();
+    } catch (e: any) { setMsg(e.message); }
+  }
+
+  return (
+    <>
+      <h2>Extra instructions per assistant</h2>
+      <p className="muted">Added to the assistant's built-in instructions for this workspace only, e.g. "Never mention pricing in a first email".</p>
+      <div className="stack" style={{ maxWidth: 720 }}>
+        <select value={agent} onChange={(e) => setAgent(e.target.value)}>
+          {agents.map((a) => <option key={a.agent} value={a.agent}>{a.label}{a.prompt_addendum ? " (customised)" : ""}</option>)}
+        </select>
+        <textarea rows={4} value={text} onChange={(e) => setText(e.target.value)} placeholder="No extra instructions" />
+        <div className="row"><button className="primary" onClick={save}>Save instructions</button>{msg && <span className="muted">{msg}</span>}</div>
+      </div>
     </>
   );
 }

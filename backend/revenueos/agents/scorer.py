@@ -49,6 +49,7 @@ async def score_contact(contact_id: int, parent_run_id: int | None = None) -> Le
             "source": c.source, "inbound_message": c.inbound_message,
             "company": c.account.name, "industry": c.account.industry,
             "employees": c.account.employees, "country": c.account.country, "notes": c.account.notes,
+            "recent_buying_signals": _signals(db, c.account_id),
         }
 
     result = await run_agent(
@@ -74,3 +75,10 @@ async def score_contact(contact_id: int, parent_run_id: int | None = None) -> Le
                         detail=f"{score.total_score} ({score.tier}) -> {score.recommended_action}"))
         get_crm().update_lead_status(c, c.status, c.score)
     return score
+
+
+def _signals(db, account_id: int) -> list[dict]:
+    """Intent surges, high-intent website visits, news triggers and churn risk from the last 30 days."""
+    from ..services import growth
+
+    return growth.recent_signals(db, account_id)

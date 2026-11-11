@@ -12,7 +12,7 @@ from sqlalchemy import select
 from ..config import settings
 from ..db import session_scope
 from ..models import Activity, Approval, Contact, SalesDocument, Suppression
-from ..services import memory
+from ..services import memory, sequences
 from ..tools.crm import get_crm
 from .base import new_run, run_agent
 from .shared_tools import brief_to_dict, get_account, get_contact, kb_search
@@ -61,6 +61,18 @@ async def triage_reply(
     cancelled: list[tuple[int, str]] | None = None, parent_run_id: int | None = None,
 ) -> str:
     """Classify a reply and act on it. `cancelled` = follow-ups the webhook paused, as (approval_id, previous_status)."""
+    t, run_id = await classify_reply(contact_id, text, subject, parent_run_id)
+    outcome = _apply_triage(contact_id, t, cancelled or [], run_id)
+
+    if t.needs_response and t.category in ("interested", "question", "objection", "referral", "not_now"):
+        await draft_reply(contact_id, text, subject, t, parent_run_id)
+        outcome += " Drafted a reply for approval."
+    return f"{t.category} ({t.sentiment}): {t.summary} {outcome}"
+
+
+async def classify_reply(contact_id: int, text: str, subject: str | None = None,
+                         parent_run_id: int | None = None) -> tuple[ReplyTriage, int]:
+    """The classification step alone (no side effects)."""
     with session_scope() as db:
         c = db.get(Contact, contact_id)
         context = {"contact": c.full_name, "title": c.title, "company": c.account.name,
@@ -76,13 +88,7 @@ async def triage_reply(
         output_format=ReplyTriage,
         parent_run_id=parent_run_id,
     )
-    t: ReplyTriage = result.parsed
-    outcome = _apply_triage(contact_id, t, cancelled or [], result.run_id)
-
-    if t.needs_response and t.category in ("interested", "question", "objection", "referral", "not_now"):
-        await draft_reply(contact_id, text, subject, t, parent_run_id)
-        outcome += " Drafted a reply for approval."
-    return f"{t.category} ({t.sentiment}): {t.summary} {outcome}"
+    return result.parsed, result.run_id
 
 
 def _apply_triage(contact_id: int, t: ReplyTriage, cancelled: list[tuple[int, str]], run_id: int) -> str:
@@ -98,7 +104,10 @@ def _apply_triage(contact_id: int, t: ReplyTriage, cancelled: list[tuple[int, st
                 if a and a.status == "rejected":
                     a.status, a.review_note = prev, f"Resumed after out-of-office (back {t.return_date or 'unknown'})."
             c.status = "contacted"
-            outcome = "Out of office; sequence resumed."
+            back = _parse_date(t.return_date)
+            sequences.resume_contact(db, c.id, resume_at=back,
+                                     note=f"Out of office until {t.return_date}" if back else "Out of office")
+            outcome = "Out of office; sequence resumed" + (f" from {t.return_date}." if back else ".")
         elif t.category == "unsubscribe":
             if c.email and not db.scalar(select(Suppression).where(Suppression.email_or_domain == c.email.lower())):
                 db.add(Suppression(email_or_domain=c.email.lower(), reason="replied: unsubscribe"))
@@ -109,6 +118,13 @@ def _apply_triage(contact_id: int, t: ReplyTriage, cancelled: list[tuple[int, st
             outcome = "Wrong person; marked disqualified."
         else:
             c.status = "replied"
+        if t.category != "out_of_office":
+            # A real answer: a person takes the conversation from here.
+            sequences.stop_contact(db, c.id, f"Prospect replied ({t.category}).")
+        if t.category in ("interested", "question", "referral", "objection"):
+            from ..services import notify
+
+            notify.hot_reply(c, t.category, t.summary)
 
         if t.referral_email and not db.scalar(select(Contact).where(Contact.email.ilike(t.referral_email))):
             first, _, last = (t.referral_name or t.referral_email.split("@")[0]).partition(" ")
@@ -151,6 +167,10 @@ async def draft_reply(
     history = memory.context_block(account_id, contact_id)
     if history:
         prompt += "\n\n" + history
+    if settings.booking_url and t.category in ("interested", "question", "objection", "not_now"):
+        prompt += (f"\n\nMEETING BOOKING LINK: {settings.booking_url}\nIf they are open to a conversation, offer this "
+                   "link as the easy way to pick a time (copy it exactly). Do not propose specific times yourself.")
+        grounding += f"\n{settings.booking_url}"
     run_id = new_run("reply_writer", settings.model_worker, prompt, parent_run_id)
     result = await run_agent(
         agent="reply_writer",
@@ -163,3 +183,14 @@ async def draft_reply(
         run_id=run_id,
     )
     return result.text
+
+
+def _parse_date(value: str | None):
+    """ISO date from the triage (return from out of office) -> 09:00 UTC that day, or None."""
+    from datetime import datetime, timezone
+
+    try:
+        d = datetime.fromisoformat((value or "").strip()[:10])
+    except ValueError:
+        return None
+    return d.replace(hour=9, tzinfo=timezone.utc)

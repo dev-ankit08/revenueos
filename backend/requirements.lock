@@ -1,0 +1,17 @@
+# Exact versions this release was tested with: pip install -r requirements.lock
+# Regenerate after upgrading: python scripts/lock_requirements.py
+anthropic==1.4.0
+fastapi==0.143.0
+uvicorn[standard]==0.53.0
+sqlalchemy==2.1.4
+alembic==1.20.1
+pydantic==2.13.5
+# psycopg: not installed here
+# simple-salesforce: not installed here
+python-multipart==0.0.32
+python-pptx==1.0.2
+python-docx==1.2.0
+mcp==2.3.0
+cryptography==50.0.2
+python-dotenv==1.2.3
+pytest==9.1.1

@@ -38,6 +38,18 @@ export default function Intel() {
     load();
   }
 
+  const [snippet, setSnippet] = useState("");
+  useEffect(() => { api("/api/tracking/snippet").then((s: any) => setSnippet(s.snippet ?? "")).catch(() => {}); }, []);
+
+  async function importIntent(file: File) {
+    const fd = new FormData();
+    fd.append("file", file);
+    try {
+      const r = await api("/api/intel/intent/import?provider=csv", { method: "POST", body: fd });
+      setMsg(`Read ${r.rows} intent rows; ${r.signals} became buying signals.`);
+    } catch (e: any) { setMsg(e.message); }
+  }
+
   async function importCsv(file: File) {
     const fd = new FormData();
     fd.append("file", file);
@@ -101,6 +113,15 @@ export default function Intel() {
           </div>
         ))}
       </div>
+
+      <h2>Website visits and intent data</h2>
+      <p className="muted">Put this on every page of your website. Visitors who came from one of our emails are recognised;
+        when they view pricing, demo or contact pages, a buying signal appears above and they count as engaged.</p>
+      {snippet && <pre className="card" style={{ whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{snippet}</pre>}
+      <p className="muted">Intent data from Bombora, G2 or 6sense: send it to <code>/api/webhooks/intent</code>, or upload a CSV
+        (columns: domain or company, topic, score 0-100):{" "}
+        <label className="btn">Upload intent CSV<input type="file" accept=".csv" hidden onChange={(e) => e.target.files?.[0] && importIntent(e.target.files[0])} /></label>
+      </p>
 
       <h2>Find new accounts</h2>
       <form className="card row" onSubmit={(e) => { e.preventDefault(); run("Sourcing accounts", "/api/intel/source", sourceReq); }}>

@@ -56,6 +56,9 @@ def upsert_lead(db: Session, lead: LeadIn) -> Contact:
     )
     db.add(contact)
     db.flush()
+    from ..services import salesmgmt
+
+    salesmgmt.assign_owner(db, contact)
     return contact
 
 
@@ -102,7 +105,9 @@ def lead_detail(contact_id: int, db: Session = Depends(get_db)):
     a = c.account
     return contact_to_dict(c) | {
         "score_reason": c.score_reason, "inbound_message": c.inbound_message, "linkedin_url": c.linkedin_url,
-        "experiment_group": c.experiment_group, "dossier": get_dossier(c.id),
+        "experiment_group": c.experiment_group, "timezone": c.timezone, "owner": c.owner,
+        "lifecycle": c.lifecycle, "email_status": c.email_status, "lawful_basis": c.lawful_basis,
+        "consent_source": c.consent_source, "consent_at": c.consent_at, "dossier": get_dossier(c.id),
         "account_detail": {"id": a.id, "name": a.name, "domain": a.domain, "industry": a.industry,
                            "employees": a.employees, "country": a.country, "notes": a.notes},
         "brief": brief_to_dict(a.briefs[0] if a.briefs else None),

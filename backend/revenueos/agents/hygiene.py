@@ -37,6 +37,16 @@ class Enrichment(BaseModel):
 async def run_hygiene(enrich: bool = True, parent_run_id: int | None = None) -> dict:
     """Returns {"document_id", "summary"}. With enrich=True, fills high-confidence gaps via Haiku."""
     applied: list[str] = []
+    from ..tools import dataproviders
+
+    if enrich and dataproviders.enrichment_provider():
+        # A data provider beats the AI's memory: use it for contacts not yet enriched.
+        from ..services import datahealth
+
+        with session_scope() as db:
+            n = datahealth.enrich_pending(db, limit=50)
+        applied.append(f"{n} contacts enriched from {dataproviders.enrichment_provider()}")
+        enrich = False
     if enrich:
         with session_scope() as db:
             todo = [{"account_id": a.id, "name": a.name, "domain": a.domain}

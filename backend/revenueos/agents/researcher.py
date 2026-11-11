@@ -87,4 +87,33 @@ async def research_account(account_id: int, focus: str | None = None, parent_run
         effort="medium",
         parent_run_id=parent_run_id,
     )
-    return result.text
+    note = verify_brief_sources(account_id, result.run_id)
+    return result.text + (f"\n\n{note}" if note else "")
+
+
+def verify_brief_sources(account_id: int, run_id: int) -> str | None:
+    """Remove news items and sources the researcher cited but never found or opened in this run."""
+    from sqlalchemy import select
+
+    from ..models import AgentRun
+    from ..services import sources
+
+    with session_scope() as db:
+        run = db.get(AgentRun, run_id)
+        if not run or not run.source_urls:
+            return None  # no record of what was read (e.g. no web tools ran): nothing to compare against
+        brief = db.scalar(select(AccountBrief).where(AccountBrief.account_id == account_id)
+                          .order_by(AccountBrief.id.desc()))
+        if not brief or (run.started_at and brief.created_at and brief.created_at < run.started_at):
+            return None
+        cited = list(brief.sources or []) + [u for item in brief.recent_news or [] for u in sources.urls_in_text(item)]
+        bad = sources.unverified(db, cited)
+        if not bad:
+            brief.unverified_sources = []
+            return None
+        bad_keys = {sources.normalise(u) for u in bad}
+        brief.sources = [u for u in brief.sources or [] if sources.normalise(u) not in bad_keys]
+        brief.recent_news = [n for n in brief.recent_news or []
+                             if not any(sources.normalise(u) in bad_keys for u in sources.urls_in_text(n))]
+        brief.unverified_sources = bad
+        return f"Removed {len(bad)} cited source(s) the researcher never actually opened."

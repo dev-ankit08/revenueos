@@ -3,7 +3,7 @@ import base64
 import hashlib
 import hmac
 
-from cryptography.fernet import Fernet, InvalidToken
+from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 
 from ..config import settings
 
@@ -12,11 +12,23 @@ class SecretKeyMissing(RuntimeError):
     pass
 
 
-def _fernet() -> Fernet:
+def _fernet_for(secret: str) -> Fernet:
+    return Fernet(base64.urlsafe_b64encode(hashlib.sha256(secret.encode()).digest()))
+
+
+def _fernet() -> MultiFernet:
+    """Encrypts with SECRET_KEY; also decrypts values written with SECRET_KEY_OLD during a key rotation."""
     if not settings.secret_key:
         raise SecretKeyMissing("Set SECRET_KEY before connecting mailboxes, calendars or call tools.")
-    key = base64.urlsafe_b64encode(hashlib.sha256(settings.secret_key.encode()).digest())
-    return Fernet(key)
+    keys = [_fernet_for(settings.secret_key)]
+    if settings.secret_key_old:
+        keys.append(_fernet_for(settings.secret_key_old))
+    return MultiFernet(keys)
+
+
+def rotate(value: str | None) -> str | None:
+    """Re-encrypt a stored value with the current key."""
+    return _fernet().rotate(value.encode()).decode() if value else None
 
 
 def encrypt(value: str | None) -> str | None:

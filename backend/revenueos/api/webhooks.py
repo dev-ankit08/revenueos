@@ -3,8 +3,9 @@
 Point your website form, email provider or Salesforce Flow at these endpoints.
 """
 import hmac
+import json
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -14,6 +15,7 @@ from ..agents import workflows
 from ..config import settings
 from ..db import get_db
 from ..models import Activity, Contact
+from ..services import email_events as email_events_svc
 from ..services import inbound as inbound_replies
 from .leads import LeadIn, upsert_lead
 
@@ -82,3 +84,44 @@ def unsubscribe(u: UnsubscribeIn, db: Session = Depends(get_db)):
     inbound_replies.suppress(db, u.email, "unsubscribe")
     db.commit()
     return {"suppressed": u.email.lower()}
+
+
+# ------------------------------------------------------------------ sending-service delivery events
+
+def _secret_ok(header: str | None, token: str | None) -> bool:
+    """Shared secret in the X-Webhook-Secret header or ?token= (for providers that cannot set headers)."""
+    if not settings.webhook_secret:
+        return True
+    return any(v and hmac.compare_digest(v, settings.webhook_secret) for v in (header, token))
+
+
+@router.post("/email/{provider}")
+async def email_events(provider: str, request: Request, db: Session = Depends(get_db),
+                       token: str | None = None, x_webhook_secret: str | None = Header(default=None)):
+    """Bounces, complaints, unsubscribes, opens and clicks from SendGrid or Postmark.
+
+    SendGrid: Settings > Mail Settings > Event Webhook, URL .../api/webhooks/email/sendgrid?ws=<slug>; enable
+    the signed webhook and set SENDGRID_WEBHOOK_PUBLIC_KEY (or append &token=<WEBHOOK_SECRET>).
+    Postmark: Servers > Webhooks, URL .../api/webhooks/email/postmark?ws=<slug>, custom header
+    X-Webhook-Secret: <WEBHOOK_SECRET>.
+    """
+    raw = await request.body()
+    if provider == "sendgrid":
+        key = settings.sendgrid_webhook_public_key
+        if key:
+            sig = request.headers.get("X-Twilio-Email-Event-Webhook-Signature", "")
+            ts = request.headers.get("X-Twilio-Email-Event-Webhook-Timestamp", "")
+            if not email_events_svc.verify_sendgrid(key, raw, sig, ts):
+                raise HTTPException(401, "Bad SendGrid signature")
+        elif not _secret_ok(x_webhook_secret, token):
+            raise HTTPException(401, "Bad webhook secret")
+        events = email_events_svc.normalise_sendgrid(json.loads(raw or b"[]"))
+    elif provider == "postmark":
+        if not _secret_ok(x_webhook_secret, token):
+            raise HTTPException(401, "Bad webhook secret")
+        events = email_events_svc.normalise_postmark(json.loads(raw or b"{}"))
+    else:
+        raise HTTPException(404, "Unknown email provider")
+    counts = email_events_svc.record(db, provider, events)
+    db.commit()
+    return {"received": len(events), "processed": counts}

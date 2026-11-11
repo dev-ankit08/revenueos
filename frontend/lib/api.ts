@@ -22,7 +22,15 @@ export async function api<T = any>(path: string, init: RequestInit = {}): Promis
       && !window.location.pathname.startsWith("/embed")) {
     window.location.href = "/login";
   }
-  if (!res.ok) throw new Error(data.detail ? String(data.detail) : `${res.status} ${res.statusText}`);
+  if (!res.ok) {
+    const d = data.detail;
+    const message = d == null ? `${res.status} ${res.statusText}`
+      : typeof d === "string" ? d : d.message ?? (Array.isArray(d) ? d.map((x: any) => x.msg).join("; ") : JSON.stringify(d));
+    const err: any = new Error(message);
+    err.detail = d;
+    err.status = res.status;
+    throw err;
+  }
   return data as T;
 }
 
@@ -106,6 +114,11 @@ export type Approval = {
   claims: { text: string; source: string }[] | null;
   personalisation_notes: { specific_facts_used?: string[]; generic_phrases?: string[]; feedback?: string } | null;
   created_by_agent: string;
+  reviewed_by?: string | null;
   review_note: string | null;
+  reject_reason?: string | null;
+  edit_pct?: number | null;
+  ai_subject?: string | null;
+  ai_body?: string | null;
   contact: { id: number; name: string; title: string | null; email: string | null; account: string; score: number | null; tier: string | null } | null;
 };

@@ -171,11 +171,20 @@ def attribution(db: Session) -> dict:
         touches = [a for a in sent if a.contact_id in member_ids and _aware(a.sent_at) and _aware(a.sent_at) >= started]
         accounts = {c.account_id for c in contacts if c.id in member_ids}
         new_opps = [o for acc in accounts for o in opp_by_account[acc] if _aware(o.created_at) >= started]
+        from ..models import CampaignSpend
+        from sqlalchemy import func as _f
+
+        spend = float(db.scalar(select(_f.coalesce(_f.sum(CampaignSpend.amount), 0.0))
+                                .where(CampaignSpend.campaign_id == camp.id)) or 0.0)
+        meetings = sum(1 for c in contacts if c.id in member_ids and c.status == "meeting")
+        won = sum(o.amount or 0 for o in new_opps if o.stage == "closed_won")
+        pipeline = sum(o.amount or 0 for o in new_opps)
         by_campaign.append({
             "campaign_id": camp.id, "name": camp.name, "members": len(member_ids), **summarize(touches),
-            "meetings": sum(1 for c in contacts if c.id in member_ids and c.status == "meeting"),
-            "opportunities": len(new_opps), "pipeline": sum(o.amount or 0 for o in new_opps),
-            "won": sum(o.amount or 0 for o in new_opps if o.stage == "closed_won"),
+            "meetings": meetings, "opportunities": len(new_opps), "pipeline": pipeline, "won": won,
+            "spend": round(spend, 2), "cost_per_meeting": round(spend / meetings, 2) if spend and meetings else None,
+            "pipeline_per_dollar": round(pipeline / spend, 1) if spend else None,
+            "roi": round((won - spend) / spend, 2) if spend else None,
         })
 
     return {
@@ -319,4 +328,137 @@ def roi_ledger(db: Session) -> dict:
         "cost_per_opportunity": round(spend / len(influenced), 2) if influenced else None,
         "won_per_dollar_of_ai": round(won / spend, 1) if spend and won else None,
         "definition": "AI-influenced = deal created after RevenueOS first emailed someone at that account.",
+    }
+
+
+def draft_quality(db: Session, days: int = 90) -> dict:
+    """Reviewer trust in AI drafts over the last `days`, overall and per agent.
+
+    approved_unedited_pct is the headline accuracy metric: drafts a person sent exactly as written.
+    A/B holdout rejections are excluded (they are automatic, not a judgement on quality).
+    """
+    from .approvals import AB_HOLDOUT_NOTE, REJECT_REASONS
+
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    rows = db.scalars(select(Approval).where(
+        Approval.decided_at.is_not(None), Approval.decided_at >= since,
+        Approval.status.in_(["approved", "sent", "rejected", "failed"]),
+    )).all()
+    rows = [a for a in rows if not (a.status == "rejected" and a.review_note == AB_HOLDOUT_NOTE)]
+
+    def summarise(items: list[Approval]) -> dict:
+        approved = [a for a in items if a.status != "rejected"]
+        rejected = [a for a in items if a.status == "rejected"]
+        edits = [a.edit_pct for a in approved if a.edit_pct is not None]
+        unedited = sum(1 for e in edits if e == 0)
+        reasons: dict[str, int] = defaultdict(int)
+        for a in rejected:
+            reasons[a.reject_reason or "unspecified"] += 1
+        return {
+            "decided": len(items), "approved": len(approved), "rejected": len(rejected),
+            "approved_unedited_pct": _rate(unedited, len(edits)),
+            "avg_edit_pct": round(sum(edits) / len(edits), 1) if edits else None,
+            "reject_rate": _rate(len(rejected), len(items)),
+            "reject_reasons": dict(sorted(reasons.items(), key=lambda kv: -kv[1])),
+        }
+
+    by_agent: dict[str, list[Approval]] = defaultdict(list)
+    by_prompt: dict[str, list[Approval]] = defaultdict(list)
+    for a in rows:
+        by_agent[a.created_by_agent].append(a)
+        if a.prompt_version:
+            by_prompt[f"{a.created_by_agent}@{a.prompt_version}"].append(a)
+    return {
+        "days": days, "target_unedited_pct": 70, **summarise(rows),
+        "by_agent": {agent: summarise(items) for agent, items in sorted(by_agent.items())},
+        "by_prompt_version": {k: summarise(v) for k, v in sorted(by_prompt.items())},
+        "grader_calibration": grader_calibration(rows),
+        "reason_labels": {**REJECT_REASONS, "unspecified": "No reason given"},
+    }
+
+
+def grader_calibration(rows: list[Approval]) -> dict:
+    """Does the personalisation score predict what reviewers do? If high-scoring drafts are not sent unedited
+    more often than low-scoring ones, the grader (or the threshold) needs attention."""
+    buckets = {"under_60": [], "60_79": [], "80_plus": []}
+    for a in rows:
+        if a.personalisation_score is None:
+            continue
+        key = "under_60" if a.personalisation_score < 60 else "60_79" if a.personalisation_score < 80 else "80_plus"
+        buckets[key].append(a)
+    out = {}
+    for key, items in buckets.items():
+        approved = [a for a in items if a.status != "rejected"]
+        unedited = sum(1 for a in approved if a.edit_pct == 0)
+        out[key] = {"drafts": len(items), "approved_unedited_pct": _rate(unedited, len(approved)),
+                    "reject_rate": _rate(len(items) - len(approved), len(items))}
+    lo, hi = out["under_60"]["approved_unedited_pct"], out["80_plus"]["approved_unedited_pct"]
+    enough = buckets["under_60"] and buckets["80_plus"] and len(buckets["under_60"]) + len(buckets["80_plus"]) >= 20
+    out["verdict"] = ("not enough graded drafts yet" if not enough else
+                      "agrees with reviewers" if (hi or 0) > (lo or 0) else
+                      "does not predict reviewer decisions: review the grader rubric or threshold")
+    return out
+
+
+def multi_touch_attribution(db: Session) -> dict:
+    """Credit each deal's amount to the touches that came before it, under four models:
+    first touch, last touch, linear (equal shares) and W-shaped (40% first, 40% the touch just before the deal
+    was created, 20% spread over the rest). Touches: sent emails (by assistant or campaign), clicks, replies,
+    meetings and inbound form fills, for every contact at the deal's account."""
+    from ..models import CalendarEvent, Campaign, EmailEvent, Opportunity
+
+    campaigns = {c.id: c.name for c in db.scalars(select(Campaign))}
+
+    def label_for(a: Approval) -> str:
+        if a.campaign_id:
+            return f"campaign: {campaigns.get(a.campaign_id, a.campaign_id)}"
+        return f"email: {a.created_by_agent}"
+
+    touches_by_account: dict[int, list[tuple[datetime, str]]] = defaultdict(list)
+    contacts = {c.id: c for c in db.scalars(select(Contact))}
+    for a in db.scalars(select(Approval).where(Approval.status == "sent", Approval.sent_at.is_not(None))):
+        if a.contact_id in contacts:
+            touches_by_account[contacts[a.contact_id].account_id].append((_aware(a.sent_at), label_for(a)))
+    for e in db.scalars(select(EmailEvent).where(EmailEvent.event == "click", EmailEvent.contact_id.is_not(None))):
+        if e.contact_id in contacts:
+            touches_by_account[contacts[e.contact_id].account_id].append((_aware(e.occurred_at), "click"))
+    for act in db.scalars(select(Activity).where(Activity.type.like("reply_%"))):
+        if act.contact_id in contacts:
+            touches_by_account[contacts[act.contact_id].account_id].append((_aware(act.created_at), "reply"))
+    for ev in db.scalars(select(CalendarEvent).where(CalendarEvent.account_id.is_not(None))):
+        touches_by_account[ev.account_id].append((_aware(ev.starts_at), "meeting"))
+    for c in contacts.values():
+        if c.source == "inbound":
+            touches_by_account[c.account_id].append((_aware(c.created_at), "inbound form"))
+
+    models = {m: defaultdict(float) for m in ("first_touch", "last_touch", "linear", "w_shaped")}
+    deals = covered = 0
+    for o in db.scalars(select(Opportunity)):
+        deals += 1
+        amount = o.amount or 0
+        created = _aware(o.created_at)
+        touches = sorted(t for t in touches_by_account.get(o.account_id, []) if t[0] and t[0] <= created)
+        if not touches or not amount:
+            continue
+        covered += 1
+        labels = [label for _, label in touches]
+        models["first_touch"][labels[0]] += amount
+        models["last_touch"][labels[-1]] += amount
+        for label in labels:
+            models["linear"][label] += amount / len(labels)
+        if len(labels) == 1:
+            models["w_shaped"][labels[0]] += amount
+        elif len(labels) == 2:
+            models["w_shaped"][labels[0]] += amount / 2
+            models["w_shaped"][labels[-1]] += amount / 2
+        else:
+            models["w_shaped"][labels[0]] += amount * 0.4
+            models["w_shaped"][labels[-1]] += amount * 0.4
+            for label in labels[1:-1]:
+                models["w_shaped"][label] += amount * 0.2 / (len(labels) - 2)
+    return {
+        "deals": deals, "deals_with_touches": covered,
+        "models": {m: dict(sorted(((k, round(v, 2)) for k, v in credit.items()), key=lambda kv: -kv[1]))
+                   for m, credit in models.items()},
+        "note": "Credit uses deal amounts. A source high in first touch opens deals; high in last touch closes the gap to a deal.",
     }

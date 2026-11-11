@@ -2,7 +2,7 @@
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from .db import current_workspace, session_scope, use_workspace
 from .models import AgentRun
@@ -59,12 +59,40 @@ def bind_loop(loop: asyncio.AbstractEventLoop) -> None:
     _loop = loop
 
 
+LEASE = "scheduler"
+PERSISTED = ("hygiene_day", "signals", "review", "digest_day", "alerts_since")  # survive restarts (stored on the lease row)
+STUCK_RUN_AFTER = timedelta(hours=2)
+
+
+def _encode(st: dict) -> dict:
+    out = {k: st[k].isoformat() for k in PERSISTED if isinstance(st.get(k), (date, datetime))}
+    if isinstance(st.get("digest_day"), str):
+        out["digest_day"] = st["digest_day"]
+    return out
+
+
+def _decode(saved: dict) -> dict:
+    out: dict = {}
+    for k, v in (saved or {}).items():
+        try:
+            if k == "digest_day":
+                out[k] = v
+            else:
+                out[k] = date.fromisoformat(v) if k == "hygiene_day" else datetime.fromisoformat(v)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 async def scheduler_loop(interval_seconds: int = 900) -> None:
     """Every tick, for every workspace: release due follow-ups, process context, daily hygiene,
-    and the opt-in scheduled scans/reviews."""
-    from .services import workspaces
+    and the opt-in scheduled scans/reviews.
 
-    state: dict[int | None, dict] = {}
+    Safe with several server processes: each workspace's tick runs only in the worker holding its lease.
+    """
+    from .services import leases, workspaces
+
+    memory: dict[int | None, dict] = {}  # per-process flags (e.g. a sync already running here)
     while True:
         try:
             ids = workspaces.all_context_ids()
@@ -73,15 +101,52 @@ async def scheduler_loop(interval_seconds: int = 900) -> None:
             ids = [None]
         for ws in ids:
             with use_workspace(ws):
-                await _tick(state.setdefault(ws, {}))
+                try:
+                    with session_scope() as db:
+                        saved = leases.acquire(db, LEASE, ttl_seconds=interval_seconds + 120)
+                except Exception:
+                    log.exception("could not take the scheduler lease")
+                    continue
+                if saved is None:
+                    continue  # another worker runs this workspace
+                st = memory.setdefault(ws, {})
+                st.update(_decode(saved))
+                await _tick(st)
+                try:
+                    with session_scope() as db:
+                        leases.save_state(db, LEASE, _encode(st))
+                except Exception:
+                    log.exception("could not save scheduler state")
         await asyncio.sleep(interval_seconds)
+
+
+def sweep_stuck_runs(db) -> int:
+    """Runs left "running" by a crash or restart are marked failed so nobody waits on them forever."""
+    from sqlalchemy import select
+
+    cutoff = datetime.now(timezone.utc) - STUCK_RUN_AFTER
+    n = 0
+    for run in db.scalars(select(AgentRun).where(AgentRun.status == "running")):
+        started = run.started_at if (run.started_at is None or run.started_at.tzinfo) else run.started_at.replace(tzinfo=timezone.utc)
+        if started is not None and started < cutoff:
+            run.status, run.error = "failed", "Interrupted (the server restarted or the job stalled)."
+            run.finished_at = datetime.now(timezone.utc)
+            n += 1
+    return n
 
 
 async def _tick(st: dict) -> None:
     from .config import settings
     from .services import hygiene, memory
-    from .services.approvals import release_due_followups
+    from .services.approvals import release_due_followups, sweep_interrupted_sends
 
+    try:
+        with session_scope() as db:
+            if n := sweep_interrupted_sends(db):
+                log.warning("%d sends were interrupted and marked failed for review", n)
+            sweep_stuck_runs(db)
+    except Exception:
+        log.exception("sweep failed")
     try:
         with session_scope() as db:
             sent = release_due_followups(db)
@@ -90,15 +155,41 @@ async def _tick(st: dict) -> None:
     except Exception:
         log.exception("follow-up scheduler failed")
     try:
+        from .services import lifecycle
+
+        with session_scope() as db:
+            lifecycle.refresh_all(db)
+    except Exception:
+        log.exception("lifecycle refresh failed")
+    try:
+        from .services import datahealth, nurture
+
+        with session_scope() as db:
+            datahealth.enrich_pending(db)
+        with session_scope() as db:
+            if n := nurture.advance_all(db):
+                log.info("sent %d nurture emails", n)
+    except Exception:
+        log.exception("enrichment/nurture failed")
+    try:
         await _context_tick(st)
     except Exception:
         log.exception("context processing failed")
+    try:
+        _notify_tick(st)
+    except Exception:
+        log.exception("notifications failed")
     now = datetime.now(timezone.utc)
     try:
         if st.get("hygiene_day") != now.date():
             with session_scope() as db:
                 hygiene.save_report(db, hygiene.find_issues(db))
                 memory.purge_raw_text(db)
+                from .services import growth, privacy
+
+                privacy.purge_old(db)
+                growth.create_due_renewals(db)
+                growth.refresh_health(db)
             st["hygiene_day"] = now.date()
     except Exception:
         log.exception("hygiene report failed")
@@ -112,6 +203,22 @@ async def _tick(st: dict) -> None:
                 start(name, desc, fn)
         except Exception:
             log.exception("%s failed", name)
+
+
+def _notify_tick(st: dict) -> None:
+    """Ops alerts for failures since the last tick, SLA alerts to owners, and the morning digest."""
+    from .services import notify
+
+    now = datetime.now(timezone.utc)
+    since = st.get("alerts_since") or now - timedelta(minutes=15)
+    with session_scope() as db:
+        notify.alert_failures(db, since)
+        notify.sla_alerts(db)
+    st["alerts_since"] = now
+    if notify.due_for_digest(st.get("digest_day")):
+        with session_scope() as db:
+            notify.send_digests(db)
+        st["digest_day"] = notify.local_today()
 
 
 async def _scheduled_scan(run_id: int) -> str:

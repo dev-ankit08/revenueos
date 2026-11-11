@@ -39,12 +39,22 @@ _client: anthropic.AsyncAnthropic | None = None
 def client() -> anthropic.AsyncAnthropic:
     global _client
     if _client is None:
-        _client = anthropic.AsyncAnthropic()
+        # The SDK retries rate limits (429), overload (529), 5xx and connection errors with
+        # exponential backoff, honouring retry-after. Whole tool runs are never replayed here,
+        # because their tools may already have queued drafts.
+        _client = anthropic.AsyncAnthropic(max_retries=settings.claude_max_retries)
     return _client
+
+
+MAX_TOKENS_CEILING = 64000
 
 
 class AgentRefused(Exception):
     pass
+
+
+class TruncatedOutput(Exception):
+    """The model hit max_tokens: the answer is incomplete and must not be used as if it were whole."""
 
 
 @dataclass
@@ -62,6 +72,7 @@ class Usage:
     cache_read: int = 0
     cache_write: int = 0
     tool_calls: list = field(default_factory=list)
+    urls: set = field(default_factory=set)  # pages web_search / web_fetch actually returned
 
     def add(self, message) -> None:
         u = message.usage
@@ -72,6 +83,8 @@ class Usage:
         for block in message.content:
             if block.type in ("tool_use", "server_tool_use"):
                 self.tool_calls.append({"tool": block.name, "input": _short(block.input)})
+            elif block.type in ("web_search_tool_result", "web_fetch_tool_result") or getattr(block, "citations", None):
+                self.urls |= _urls_in(block)
 
     def cost(self, model: str) -> float:
         p_in, p_out, p_cache = PRICES.get(model, (4.00, 20.00, 0.20))
@@ -81,23 +94,61 @@ class Usage:
         ) / 1_000_000
 
 
+def _urls_in(obj: Any, depth: int = 0) -> set[str]:
+    """Every `url` field in a server-tool result or citation block (shapes differ by tool version)."""
+    if obj is None or depth > 5 or isinstance(obj, (int, float, bool)):
+        return set()
+    if isinstance(obj, str):
+        return set()
+    if isinstance(obj, dict):
+        items = obj.items()
+    elif isinstance(obj, (list, tuple)):
+        return set().union(*(_urls_in(x, depth + 1) for x in obj)) if obj else set()
+    else:
+        items = vars(obj).items() if hasattr(obj, "__dict__") else []
+    found: set[str] = set()
+    for key, value in items:
+        if key == "url" and isinstance(value, str) and value.startswith("http"):
+            found.add(value)
+        elif not key.startswith("_"):
+            found |= _urls_in(value, depth + 1)
+    return found
+
+
 def _short(value: Any, limit: int = 300) -> Any:
     text = json.dumps(value, default=str)
     return value if len(text) <= limit else text[:limit] + "..."
 
 
-def system_blocks(role_prompt: str) -> list[dict]:
+def system_blocks(role_prompt: str, addendum: str | None = None) -> list[dict]:
     """Stable company context first (cached across all agents and runs), role instructions after."""
     with session_scope() as db:
         context = kb.company_context(db)
+    role = role_prompt + (f"\n\nADDITIONAL INSTRUCTIONS FROM THIS COMPANY (follow them):\n{addendum}" if addendum else "")
     return [
         {
             "type": "text",
             "text": f"You work for {settings.company_name}.\n\n# COMPANY CONTEXT\n{context}",
             "cache_control": {"type": "ephemeral"},
         },
-        {"type": "text", "text": role_prompt},
+        {"type": "text", "text": role},
     ]
+
+
+def prompt_version(agent: str, role_prompt: str, addendum: str | None) -> str:
+    """Short hash of the agent's instructions; recorded once in prompt_versions with the full text."""
+    import hashlib
+
+    from ..models import PromptVersion
+
+    text = role_prompt + ("\n\n" + addendum if addendum else "")
+    version = hashlib.sha256(f"{agent}\n{text}".encode()).hexdigest()[:12]
+    with session_scope() as db:
+        from sqlalchemy import select
+
+        if not db.scalar(select(PromptVersion.id).where(PromptVersion.version == version)):
+            db.add(PromptVersion(agent=agent, version=version, text=text))
+    return version
 
 
 def _request_options(model: str) -> dict:
@@ -127,6 +178,18 @@ def _finish_run(run_id: int, model: str, usage: Usage, output: str | None, error
         run.cache_read_tokens = usage.cache_read
         run.cost_usd = round(usage.cost(model), 5)
         run.finished_at = datetime.now(timezone.utc)
+        if usage.urls:
+            from ..services import sources
+
+            run.source_urls = sorted(usage.urls)[:500]
+            sources.record(db, usage.urls, run_id=run.id, agent=run.agent)
+
+
+def _set_prompt_version(run_id: int, version: str) -> None:
+    with session_scope() as db:
+        run = db.get(AgentRun, run_id)
+        if run:
+            run.prompt_version = version
 
 
 def final_text(message) -> str:
@@ -155,10 +218,12 @@ async def run_agent(
     try:
         # Budgets, on/off switch and model overrides from AI governance (raises when over budget).
         model = governance.authorize(agent, model)
+        addendum = governance.prompt_addendum(agent)
+        _set_prompt_version(run_id, prompt_version(agent, role_prompt, addendum))
         params: dict[str, Any] = dict(
             model=model,
             max_tokens=max_tokens,
-            system=system_blocks(role_prompt),
+            system=system_blocks(role_prompt, addendum),
             messages=[{"role": "user", "content": prompt}],
             output_config={"effort": effort},
             **_request_options(model),
@@ -178,14 +243,28 @@ async def run_agent(
             async with client().beta.messages.stream(**params) as stream:
                 last = await stream.get_final_message()
             usage.add(last)
+            if last.stop_reason == "max_tokens" and params["max_tokens"] < MAX_TOKENS_CEILING:
+                # No tools ran, so a retry with more room is safe and avoids a cut-off answer.
+                log.warning("%s hit max_tokens=%s; retrying with more room", agent, params["max_tokens"])
+                params["max_tokens"] = min(params["max_tokens"] * 2, MAX_TOKENS_CEILING)
+                async with client().beta.messages.stream(**params) as stream:
+                    last = await stream.get_final_message()
+                usage.add(last)
 
         if last.stop_reason == "refusal":
             details = getattr(last, "stop_details", None)
             raise AgentRefused(f"{agent} declined the request ({getattr(details, 'category', None)}).")
-        if last.stop_reason == "max_tokens":
-            log.warning("%s hit max_tokens; output may be truncated", agent)
+        truncated = last.stop_reason == "max_tokens"
+        if truncated and (not tools or output_format is not None):
+            # A cut-off answer or structured result is never reported as a clean success.
+            raise TruncatedOutput(f"{agent} ran out of room (max_tokens={params['max_tokens']}); output was cut off.")
 
         text = final_text(last)
+        if truncated:
+            # Tool runs keep what their tools already saved (e.g. queued drafts); only the closing
+            # summary was cut off, so say so instead of failing the whole run.
+            log.warning("%s hit max_tokens in its final reply", agent)
+            text += "\n\n[Note: this reply was cut off. Anything the assistant saved is intact; check the results.]"
         parsed = getattr(last, "parsed_output", None)
         _finish_run(run_id, model, usage, text or (parsed.model_dump_json() if parsed else ""), None)
         return AgentResult(text=text, run_id=run_id, message=last, parsed=parsed)

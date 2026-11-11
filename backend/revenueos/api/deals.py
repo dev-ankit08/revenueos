@@ -125,7 +125,8 @@ def opp_to_dict(o: Opportunity) -> dict:
             "qualification": o.qualification, "next_steps": o.next_steps,
             "risks": o.risks, "account": o.account.name, "account_id": o.account_id,
             "primary_contact_id": o.primary_contact_id, "sf_id": o.sf_id, "crm_id": o.crm_id,
-            "last_activity_at": o.last_activity_at}
+            "last_activity_at": o.last_activity_at, "owner": o.owner, "close_reason": o.close_reason,
+            "close_reason_detail": o.close_reason_detail, "competitors": o.competitors or []}
 
 
 @router.get("/deals")
@@ -138,15 +139,44 @@ class DealPatch(BaseModel):
                    "closed_won", "closed_lost"] | None = None
     amount: float | None = None
     close_date: str | None = None
+    owner: str | None = None
+    close_reason: str | None = None  # required when closing; see GET /api/deals/close-reasons
+    close_reason_detail: str | None = None
+    competitors: list[str] | None = None
+
+
+@router.get("/deals/close-reasons")
+def close_reasons():
+    from ..services.salesmgmt import CLOSE_REASONS
+
+    return CLOSE_REASONS
 
 
 @router.patch("/deals/{opp_id}")
 def update_deal(opp_id: int, body: DealPatch, db: Session = Depends(get_db)):
+    from ..services import salesmgmt
+
     o = db.get(Opportunity, opp_id)
     if not o:
         raise HTTPException(404, "Deal not found")
+    if body.stage in ("closed_won", "closed_lost"):
+        reason = body.close_reason or o.close_reason
+        valid = salesmgmt.CLOSE_REASONS["won" if body.stage == "closed_won" else "lost"]
+        if reason not in valid:
+            raise HTTPException(422, f"Say why it was {'won' if body.stage == 'closed_won' else 'lost'}: "
+                                     f"close_reason must be one of {', '.join(valid)}.")
     for field, value in body.model_dump(exclude_none=True).items():
         setattr(o, field, value)
+    if body.stage == "closed_won":
+        from ..services import growth
+
+        db.flush()
+        growth.contract_from_won_deal(db, o)  # recurring line items -> a contract with a renewal date
+        if o.deal_type == "renewal":
+            from ..models import Contract
+
+            for k in db.scalars(select(Contract).where(Contract.renewal_opportunity_id == o.id)):
+                k.status = "renewed"
     get_crm().upsert_opportunity(o)
     db.commit()
     return opp_to_dict(o)

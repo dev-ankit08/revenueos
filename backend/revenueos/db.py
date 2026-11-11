@@ -75,6 +75,10 @@ def _prepare(eng) -> None:
 
     Base.metadata.create_all(eng)
     _add_missing_columns(eng)
+    # Versioned migrations (backend/migrations) for changes beyond adding nullable columns.
+    from .migrations import upgrade_engine
+
+    upgrade_engine(eng)
 
 
 def init_db() -> None:

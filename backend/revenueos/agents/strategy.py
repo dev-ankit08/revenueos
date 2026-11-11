@@ -1,6 +1,6 @@
 """Revenue intelligence agents (Opus): Deal Strategist, Forecast Analyst, Learning loop."""
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -8,8 +8,8 @@ from sqlalchemy import select
 
 from ..config import settings
 from ..db import session_scope
-from ..models import Activity, Approval, Contact, KBDocument, Opportunity, SalesDocument, Signal
-from ..services import approvals, insights, memory
+from ..models import Activity, Approval, Contact, KBDocument, Opportunity, SalesDocument, Signal, Task
+from ..services import approvals, insights, memory, personalisation
 from ..tools import kb
 from ..tools.crm import get_crm
 from .base import run_agent
@@ -80,6 +80,9 @@ def _deal_context(db, o: Opportunity) -> dict:
     return {
         "opportunity": {"id": o.id, "name": o.name, "stage": o.stage, "amount": o.amount, "close_date": o.close_date,
                         "meddicc": o.qualification, "next_steps": o.next_steps, "risks": o.risks,
+                        "competitors": o.competitors or [], "owner": o.owner,
+                        "line_items": _lines(db, o.id),
+                        "our_record_vs_these_competitors": _competitor_record(db, o.competitors or []),
                         "days_since_activity": (now - last).days, "proposal_sent": has_proposal,
                         "stage_history": [{"to": c.to_stage, "at": c.changed_at.date().isoformat()}
                                           for c in o.stage_changes]},
@@ -149,10 +152,20 @@ async def review_deal(opportunity_id: int, parent_run_id: int | None = None) -> 
                                 if s.next_best_actions else "Deal strategist recommendation",
                                 grounding_extra=json.dumps(context, default=str))
             approval_id = a.id
+        contact = db.get(Contact, o.primary_contact_id) if o.primary_contact_id else None
+        for act in s.next_best_actions[:5]:
+            db.add(Task(type="follow_up", title=act.action[:255], opportunity_id=o.id,
+                        contact_id=o.primary_contact_id, owner=(contact.owner if contact else None),
+                        created_by="deal_strategist", notes=f"Owner: {act.owner.replace('_', ' ')}. Why: {act.why}",
+                        due_at=datetime.now(timezone.utc) + timedelta(days=max(0, act.due_in_days))))
         get_crm().upsert_opportunity(o)
         db.flush()
-        return {"opportunity_id": o.id, "document_id": doc.id, "health": s.health,
-                "win_probability": s.win_probability, "approval_id": approval_id}
+        out = {"opportunity_id": o.id, "document_id": doc.id, "health": s.health,
+               "win_probability": s.win_probability, "approval_id": approval_id}
+    if approval_id:
+        await personalisation.grade_approval(approval_id, json.dumps(context, default=str),
+                                             parent_run_id=result.run_id)
+    return out
 
 
 async def review_pipeline(limit: int = 20, parent_run_id: int | None = None) -> str:
@@ -236,7 +249,11 @@ async def forecast(target: float | None = None, parent_run_id: int | None = None
 LEARN_ROLE = """You are the Learning agent. Study our sent outreach and what happened to it, and distil a short,
 practical playbook the writing agents will follow. Base every point on patterns in THIS data (cite counts),
 weigh the A/B results (only significant winners are proof), and be honest about uncertainty: with a small
-sample, say so and keep conclusions tentative. Do not repeat generic best practice that the data doesn't show."""
+sample, say so and keep conclusions tentative. Do not repeat generic best practice that the data doesn't show.
+
+You also get what our reviewers did before sending: how they EDITED drafts (AI original vs what was sent) and
+why they REJECTED drafts (structured reasons and notes). Patterns in edits and rejections are direct instructions
+from the team: turn recurring ones into what_to_avoid / what_works points and cite how often they happened."""
 
 
 class PersonaAngle(BaseModel):
@@ -256,7 +273,6 @@ class Playbook(BaseModel):
 
 
 PLAYBOOK_TITLE = "Outreach playbook (learned)"
-MIN_SENT, MIN_REPLIES = 20, 3
 
 
 def _outcome(reply_type: str | None) -> str:
@@ -267,15 +283,36 @@ def _outcome(reply_type: str | None) -> str:
     return "other_reply" if reply_type else "no_reply"
 
 
+def reviewer_feedback(db, limit: int = 60) -> dict:
+    """What reviewers changed and rejected: the most direct signal of what the drafts get wrong."""
+    edited = list(db.scalars(select(Approval).where(Approval.ai_body.is_not(None), Approval.edit_pct > 0)
+                             .order_by(Approval.decided_at.desc()).limit(limit)))
+    rejected = list(db.scalars(select(Approval).where(Approval.status == "rejected", Approval.reject_reason.is_not(None))
+                               .order_by(Approval.decided_at.desc()).limit(limit)))
+    reasons: dict[str, int] = {}
+    for a in rejected:
+        reasons[a.reject_reason] = reasons.get(a.reject_reason, 0) + 1
+    return {
+        "edits": [{"agent": a.created_by_agent, "edit_pct": a.edit_pct, "ai_subject": a.ai_subject,
+                   "sent_subject": a.subject, "ai_body": (a.ai_body or "")[:600], "sent_body": a.body[:600]}
+                  for a in edited],
+        "reject_reasons": reasons,
+        "reject_notes": [{"agent": a.created_by_agent, "reason": a.reject_reason, "note": a.review_note}
+                         for a in rejected if a.review_note][:30],
+    }
+
+
 async def learn_from_results(parent_run_id: int | None = None) -> dict:
+    min_sent, min_replies = int(settings.learn_min_sent), int(settings.learn_min_replies)
     with session_scope() as db:
         credited = insights.credited_replies(db)
         sent = list(db.scalars(select(Approval).where(Approval.status == "sent", Approval.kind == "email")
                                .order_by(Approval.sent_at.desc()).limit(200)))
         replies = sum(1 for a in sent if a.id in credited)
-        if len(sent) < MIN_SENT or replies < MIN_REPLIES:
-            return {"updated": False, "reason": f"Need at least {MIN_SENT} sent emails and {MIN_REPLIES} replies "
+        if len(sent) < min_sent or replies < min_replies:
+            return {"updated": False, "reason": f"Need at least {min_sent} sent emails and {min_replies} replies "
                                                 f"to learn reliably (have {len(sent)} and {replies})."}
+        feedback = reviewer_feedback(db)
         samples = [{
             "subject": a.subject, "body": a.body[:700], "step": a.sequence_step, "variant": a.variant,
             "agent": a.created_by_agent, "title": a.contact.title if a.contact else None,
@@ -287,7 +324,8 @@ async def learn_from_results(parent_run_id: int | None = None) -> dict:
         agent="learning",
         model=settings.model_orchestrator,
         role_prompt=LEARN_ROLE,
-        prompt=f"Results summary:\n{json.dumps(stats, default=str)}\n\nSent emails with outcomes:\n{json.dumps(samples)}",
+        prompt=(f"Results summary:\n{json.dumps(stats, default=str)}\n\nSent emails with outcomes:\n{json.dumps(samples)}"
+                f"\n\nReviewer edits and rejections:\n{json.dumps(feedback, default=str)}"),
         effort="high",
         max_tokens=8000,
         output_format=Playbook,
@@ -300,13 +338,86 @@ async def learn_from_results(parent_run_id: int | None = None) -> dict:
         "", "Subject lines:", *[f"- {x}" for x in p.subject_lines],
         "", "By persona:", *[f"- {x.persona}: {x.angle} ({x.evidence})" for x in p.by_persona],
     ])
+    auto = settings.learn_auto_publish
+    auto = auto if isinstance(auto, bool) else str(auto).lower() in ("1", "true", "yes")
     with session_scope() as db:
+        doc = SalesDocument(kind="playbook", title=f"Playbook proposal {datetime.now(timezone.utc):%Y-%m-%d}",
+                            content=md, data={**p.model_dump(), "status": "draft",
+                                              "edits_used": len(feedback["edits"]),
+                                              "rejections_used": sum(feedback["reject_reasons"].values())},
+                            run_id=result.run_id)
+        db.add(doc)
+        db.flush()
+        doc_id = doc.id
+    if auto:
+        publish_playbook(doc_id, "learning loop (auto-publish)")
+    return {"updated": auto, "drafted": True, "document_id": doc_id, "confidence": p.confidence,
+            "emails_analysed": len(samples), "status": "published" if auto else "draft"}
+
+
+def _status(doc: SalesDocument) -> str:
+    return (doc.data or {}).get("status", "published")
+
+
+def publish_playbook(doc_id: int, approved_by: str) -> dict:
+    """Make a playbook version the live one every writing agent reads; the previous live one is kept for rollback."""
+    with session_scope() as db:
+        doc = db.get(SalesDocument, doc_id)
+        if not doc or doc.kind != "playbook":
+            raise ValueError("No such playbook version")
+        for other in db.scalars(select(SalesDocument).where(SalesDocument.kind == "playbook", SalesDocument.id != doc_id)):
+            if _status(other) == "published":
+                other.data = {**(other.data or {}), "status": "superseded"}
+        doc.data = {**(doc.data or {}), "status": "published", "approved_by": approved_by,
+                    "published_at": datetime.now(timezone.utc).isoformat()}
         for old in db.scalars(select(KBDocument).where(KBDocument.title == PLAYBOOK_TITLE)):
             db.delete(old)
         db.flush()
-        kb.add_document(db, PLAYBOOK_TITLE, "playbook", md)
-        doc = SalesDocument(kind="playbook", title=f"Playbook update {datetime.now(timezone.utc):%Y-%m-%d}",
-                            content=md, data=p.model_dump(), run_id=result.run_id)
-        db.add(doc)
-        db.flush()
-        return {"updated": True, "document_id": doc.id, "confidence": p.confidence, "emails_analysed": len(samples)}
+        kb.add_document(db, PLAYBOOK_TITLE, "playbook", doc.content)
+        return {"document_id": doc.id, "status": "published"}
+
+
+def reject_playbook(doc_id: int, by: str) -> None:
+    with session_scope() as db:
+        doc = db.get(SalesDocument, doc_id)
+        if doc and doc.kind == "playbook" and _status(doc) == "draft":
+            doc.data = {**(doc.data or {}), "status": "rejected", "rejected_by": by}
+
+
+def rollback_playbook(by: str) -> dict:
+    """Go back to the version that was live before the current one (or to no playbook)."""
+    with session_scope() as db:
+        versions = list(db.scalars(select(SalesDocument).where(SalesDocument.kind == "playbook")
+                                   .order_by(SalesDocument.id.desc())))
+        live = next((v for v in versions if _status(v) == "published"), None)
+        if not live:
+            raise ValueError("No live playbook to roll back.")
+        previous = next((v for v in versions if v.id < live.id and _status(v) == "superseded"), None)
+        live.data = {**(live.data or {}), "status": "rolled_back", "rolled_back_by": by}
+        if previous is None:
+            for old in db.scalars(select(KBDocument).where(KBDocument.title == PLAYBOOK_TITLE)):
+                db.delete(old)
+            return {"document_id": None, "status": "no playbook"}
+        previous_id = previous.id
+    return publish_playbook(previous_id, f"rollback by {by}")
+
+
+def playbook_versions(db) -> list[dict]:
+    return [{"id": d.id, "title": d.title, "status": _status(d), "created_at": d.created_at,
+             "confidence": (d.data or {}).get("confidence"), "approved_by": (d.data or {}).get("approved_by"),
+             "edits_used": (d.data or {}).get("edits_used"), "rejections_used": (d.data or {}).get("rejections_used"),
+             "content": d.content}
+            for d in db.scalars(select(SalesDocument).where(SalesDocument.kind == "playbook")
+                                .order_by(SalesDocument.id.desc()).limit(20))]
+
+
+def _lines(db, opp_id: int) -> list[dict]:
+    from ..services import salesmgmt
+
+    return salesmgmt.lines_for(db, opp_id)
+
+
+def _competitor_record(db, competitors: list[str]) -> dict:
+    from ..services import salesmgmt
+
+    return {c: salesmgmt.record_against(db, c) for c in competitors}

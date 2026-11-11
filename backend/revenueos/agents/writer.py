@@ -48,13 +48,16 @@ Writing rules:
 - When asked for A/B variants, write variant B of step 1 with a genuinely different angle."""
 
 
-def make_queue_tool(account_contact_ids: set[int], run_id: int, grounding: str, agent_name: str = "outreach_writer"):
+def make_queue_tool(account_contact_ids: set[int], run_id: int, grounding: str, agent_name: str = "outreach_writer",
+                    enroll: bool = False):
+    """`enroll=True` for multi-step sequences: steps join the contact's enrollment and are sent by the
+    sequence engine (services/sequences.py) on schedule, inside business hours."""
     rewrites: set[tuple] = set()  # drafts already sent back once for being too generic
 
     @beta_async_tool
     async def queue_message(
         contact_id: int,
-        channel: Literal["email", "linkedin_message"],
+        channel: Literal["email", "linkedin_message", "call_task"],
         sequence_step: int,
         send_after_days: int,
         body: str,
@@ -67,10 +70,12 @@ def make_queue_tool(account_contact_ids: set[int], run_id: int, grounding: str, 
 
         Args:
             contact_id: Recipient contact id.
-            channel: "email" or "linkedin_message" (LinkedIn messages are sent by the rep manually).
+            channel: "email", "linkedin_message" (sent by the rep manually), or "call_task" (a phone call
+                step for the rep: put the call goal and talking points in body; it is not sent to anyone).
             sequence_step: 1 for the first touch, 2 for the first follow-up, and so on.
-            send_after_days: Days after approval to send. 0 for step 1; e.g. 3, 7, 14 for follow-ups.
-            body: Message body, plain text, final wording.
+            send_after_days: Days after the FIRST message is sent. 0 for step 1; e.g. 3, 7, 14 for follow-ups.
+                Sends happen inside business hours in the contact's time zone.
+            body: Message body, plain text, final wording (for call_task: goal and talking points).
             rationale: One or two sentences for the reviewer: why this angle and which brief/KB facts it uses.
             subject: Email subject line (required for email).
             variant: "A" normally; "B" for an A/B alternative of the same step.
@@ -78,6 +83,19 @@ def make_queue_tool(account_contact_ids: set[int], run_id: int, grounding: str, 
         """
         if contact_id not in account_contact_ids:
             return f"Error: contact {contact_id} is not part of this task."
+        if channel == "call_task":
+            if not enroll:
+                return "Error: call steps are only available inside a sequence."
+            from ..services import sequences
+
+            with session_scope() as db:
+                contact = db.get(Contact, contact_id)
+                task = sequences.add_task_step(db, contact, sequence_step=sequence_step, offset_days=send_after_days,
+                                               title=f"Call {contact.full_name} ({contact.account.name})",
+                                               notes=f"{body}\n\nWhy: {rationale}", task_type="call",
+                                               created_by=agent_name)
+                task_id = task.id
+            return f"Call step saved as task {task_id}; it is scheduled when the sequence reaches step {sequence_step}."
         with session_scope() as db:
             c = db.get(Contact, contact_id)
             recipient = {"name": c.full_name, "title": c.title, "company": c.account.name}
@@ -99,14 +117,15 @@ def make_queue_tool(account_contact_ids: set[int], run_id: int, grounding: str, 
                 db, kind=channel, contact=contact, subject=subject, body=body,
                 sequence_step=sequence_step, send_after_days=send_after_days, variant=variant,
                 rationale=rationale, created_by_agent=agent_name, run_id=run_id,
-                grounding_extra=grounding, claims=[c.model_dump() for c in claims or []],
+                grounding_extra=grounding, claims=[c.model_dump() for c in claims or []], enroll=enroll,
             )
             approval.personalisation_score = g.score
             approval.personalisation_notes = g.model_dump(exclude={"score"})
-            if g.score < threshold:
-                approval.guardrail_flags = [*approval.guardrail_flags, {
-                    "severity": "warn", "code": "low_personalisation",
-                    "message": f"Personalisation {g.score}/100 after a rewrite. {g.feedback}"}]
+            extra = personalisation.review_flags(g)
+            for f in extra:
+                if f["code"] == "low_personalisation":
+                    f["message"] = f"Personalisation {g.score}/100 after a rewrite. {g.feedback}"
+            approval.guardrail_flags = [*approval.guardrail_flags, *extra]
             flags = approval.guardrail_flags
             approval_id = approval.id
         if any(f["severity"] == "block" for f in flags):
@@ -122,6 +141,7 @@ async def write_sequence(
     contact_id: int, steps: int = 3, instructions: str | None = None,
     ab_test: bool = False, parent_run_id: int | None = None,
 ) -> str:
+    await refresh_stale_research(contact_id, parent_run_id)
     with session_scope() as db:
         contact = db.get(Contact, contact_id)
         if not contact:
@@ -137,7 +157,8 @@ async def write_sequence(
     steps = max(1, min(steps, 6))
     prompt = (
         f"Write a {steps}-step outbound sequence for contact_id={contact_id} ({label}), "
-        f"account_id={account.id}. Use email for every step unless told otherwise."
+        f"account_id={account.id}. Use email for every step unless told otherwise (a call step uses "
+        f"channel call_task; a LinkedIn step uses linkedin_message)."
     )
     if ab_test:
         prompt += " Also queue a variant B of step 1."
@@ -159,7 +180,7 @@ async def write_sequence(
         model=settings.model_worker,
         role_prompt=ROLE,
         prompt=prompt,
-        tools=[get_contact, get_account, kb_search, make_queue_tool({contact_id}, run_id, grounding)],
+        tools=[get_contact, get_account, kb_search, make_queue_tool({contact_id}, run_id, grounding, enroll=True)],
         effort="medium",
         run_id=run_id,
     )
@@ -169,3 +190,37 @@ async def write_sequence(
             contact.status = "sequenced"
         db.add(Activity(contact_id=contact_id, type="sequence_drafted", detail=f"{steps} steps queued for approval"))
     return result.text
+
+
+async def refresh_stale_research(contact_id: int, parent_run_id: int | None = None) -> list[str]:
+    """Outreach must not lean on old news: re-research an account brief or person dossier past its age limit
+    (BRIEF_MAX_AGE_DAYS, DOSSIER_MAX_AGE_DAYS) before writing. Missing research is not created here."""
+    from datetime import datetime, timedelta, timezone
+
+    from ..models import PersonProfile
+    from . import person_researcher, researcher
+
+    def old(dt, days) -> bool:
+        if dt is None:
+            return False
+        dt = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) - dt > timedelta(days=int(days))
+
+    with session_scope() as db:
+        c = db.get(Contact, contact_id)
+        if not c or c.experiment_group == "holdout":
+            return []
+        brief = c.account.briefs[0] if c.account.briefs else None
+        brief_old = brief is not None and old(brief.created_at, settings.brief_max_age_days)
+        profile = db.query(PersonProfile).filter_by(contact_id=contact_id).first()
+        dossier_old = profile is not None and old(profile.updated_at, settings.dossier_max_age_days)
+        account_id = c.account_id
+    refreshed = []
+    if brief_old:
+        await researcher.research_account(account_id, focus="Refresh: what has changed recently",
+                                          parent_run_id=parent_run_id)
+        refreshed.append("account brief")
+    if dossier_old:
+        await person_researcher.research_person(contact_id, parent_run_id=parent_run_id)
+        refreshed.append("person dossier")
+    return refreshed

@@ -84,12 +84,23 @@ textarea { resize: vertical; }
 .bubble.user { align-self: flex-end; background: var(--accent); color: #fff; white-space: pre-wrap; }
 .bubble.bot { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); }
 .steps { font-size: 12px; color: var(--muted); margin-top: 6px; }
+a.button { display: inline-block; padding: 8px 14px; border-radius: 6px; border: 1px solid var(--border); color: var(--text); }
+a.button:hover { background: var(--accent-soft); color: var(--accent); }
+
 @media (max-width: 760px) {
   .shell { flex-direction: column; }
-  .nav { width: auto; flex-direction: row; overflow-x: auto; border-right: none; border-bottom: 1px solid var(--border); padding: 10px 16px; }
+  .nav { width: auto; flex-direction: row; overflow-x: auto; border-right: none; border-bottom: 1px solid var(--border);
+         padding: 8px 12px; position: sticky; top: 0; z-index: 10; gap: 4px; white-space: nowrap; }
   .nav .brand { padding: 8px 10px; }
-  main { padding: 20px 16px; }
+  .nav a { flex-shrink: 0; }
+  main { padding: 16px; }
   table { display: block; overflow-x: auto; }
+  .grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+  .row { flex-wrap: wrap; }
+  .row > input, .row > select { max-width: 100% !important; flex: 1 1 100%; }
+  button, a.button { min-height: 40px; }
+  textarea { font-size: 16px; }
+  h1 { font-size: 20px; }
 }
 
 /* CRM side panel: no sidebar, tight padding */

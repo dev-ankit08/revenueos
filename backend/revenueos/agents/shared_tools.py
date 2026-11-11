@@ -2,8 +2,10 @@
 import json
 
 from anthropic import beta_async_tool
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 
+from ..config import settings
 from ..db import session_scope
 from ..models import Account, AccountBrief, Contact
 from ..tools import kb
@@ -23,7 +25,20 @@ def brief_to_dict(brief: AccountBrief | None) -> dict | None:
         "relevant_proof_points": brief.relevant_proof_points,
         "likely_objections": brief.likely_objections,
         "sources": brief.sources,
+        "unverified_sources_removed": brief.unverified_sources or [],
+        "stale": _stale(brief.created_at),
     }
+
+
+def _stale(created_at) -> bool:
+    from datetime import datetime, timedelta, timezone
+
+    from ..config import settings
+
+    if created_at is None:
+        return False
+    created = created_at if created_at.tzinfo else created_at.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - created > timedelta(days=int(settings.brief_max_age_days))
 
 
 def contact_to_dict(c: Contact) -> dict:
@@ -58,10 +73,35 @@ async def kb_search(query: str, category: str | None = None) -> str:
         category: Optional filter: offering, case_study, icp, persona, brand_voice, competitor, pricing, objection.
     """
     with session_scope() as db:
-        hits = kb.search(db, query, k=5, category=category)
+        hits = kb.search(db, query, k=15, category=category)
     if not hits:
         return "No matching knowledge base entries. Do not invent facts; say the proof point is not available."
-    return json.dumps(hits)
+    hits = await rerank(query, hits, k=5)
+    return json.dumps([{key: h[key] for key in ("doc_id", "chunk_id", "title", "category", "text")} for h in hits])
+
+
+class _Ranking(BaseModel):
+    best_first: list[int] = Field(description="Indexes of the passages that answer the query, most useful first. "
+                                              "Leave out passages that do not help.")
+
+
+async def rerank(query: str, hits: list[dict], k: int = 5) -> list[dict]:
+    """Keyword search finds candidates; a fast model orders them by how well they answer the query.
+    Falls back to keyword order if reranking is off or fails."""
+    if not settings.kb_rerank or len(hits) <= k:
+        return hits[:k]
+    from .base import run_agent
+
+    listing = "\n\n".join(f"[{i}] {h['title']} ({h['category']}): {h['text'][:700]}" for i, h in enumerate(hits))
+    try:
+        r = await run_agent(agent="kb_reranker", model=settings.model_fast, effort="low", max_tokens=400,
+                            role_prompt="You rank knowledge-base passages by how directly they answer a query.",
+                            prompt=f"Query: {query}\n\nPassages:\n{listing}", output_format=_Ranking)
+        order = [i for i in r.parsed.best_first if 0 <= i < len(hits)]
+    except Exception:
+        return hits[:k]
+    ranked = [hits[i] for i in dict.fromkeys(order)]
+    return (ranked or hits)[:k]
 
 
 @beta_async_tool

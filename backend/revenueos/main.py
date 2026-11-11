@@ -9,14 +9,24 @@ from fastapi.responses import JSONResponse
 
 from . import jobs
 from .api import (analytics, approvals, copilot, deals, evaluation, insights, integrations, kb, leads, marketing,
-                  onboarding, webhooks, workspace)
+                  growth, myday, nurture, onboarding, privacy, salesmgmt, sequences, webhooks, workspace)
 from .config import settings
 from .db import current_workspace, init_db
 from .integrations import slack_bot  # noqa: F401  (registers the Slack approval hook)
 from .services import auth, workspaces
 from .tools.crm import get_crm
+from .tools.email import active_provider as active_email_provider
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+log = logging.getLogger("revenueos")
+
+if settings.sentry_dsn:  # optional error tracking
+    try:
+        import sentry_sdk
+
+        sentry_sdk.init(dsn=settings.sentry_dsn, traces_sample_rate=0.1, send_default_pii=False)
+    except ImportError:
+        log.warning("SENTRY_DSN is set but sentry-sdk is not installed (pip install sentry-sdk).")
 workspaces.install()  # `settings` now reads the current workspace's own values first
 
 
@@ -48,6 +58,22 @@ PUBLIC_PATHS = {
 
 
 @app.middleware("http")
+async def request_id(request: Request, call_next):
+    """Every response carries X-Request-ID (taken from the caller or generated) to trace a problem in the logs."""
+    import time
+    import uuid
+
+    rid = request.headers.get("x-request-id") or uuid.uuid4().hex[:16]
+    started = time.perf_counter()
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = rid
+    if request.url.path.startswith("/api") and (response.status_code >= 500 or time.perf_counter() - started > 5):
+        log.warning("%s %s -> %s in %.1fs (request %s)", request.method, request.url.path, response.status_code,
+                    time.perf_counter() - started, rid)
+    return response
+
+
+@app.middleware("http")
 async def workspace_and_auth(request: Request, call_next):
     """Decide who is calling and which workspace (client database) the request runs in.
 
@@ -59,7 +85,7 @@ async def workspace_and_auth(request: Request, call_next):
     path = request.url.path
     ctx, caller = None, {"user": None, "role": "admin", "workspace": None}
     if path.startswith("/api") and request.method != "OPTIONS":
-        if path in PUBLIC_PATHS or path.startswith("/api/webhooks"):
+        if path in PUBLIC_PATHS or path.startswith(("/api/webhooks", "/api/public/", "/api/auth/oidc/")):
             slug = request.query_params.get("ws")
             if slug:
                 ws = workspaces.by_slug(slug)
@@ -86,7 +112,7 @@ async def workspace_and_auth(request: Request, call_next):
 
 
 for module in (leads, approvals, copilot, kb, webhooks, analytics, insights, deals, marketing, integrations,
-               workspace, onboarding, evaluation):
+               workspace, onboarding, evaluation, sequences, myday, salesmgmt, nurture, privacy, growth):
     app.include_router(module.router)
 
 
@@ -94,7 +120,7 @@ for module in (leads, approvals, copilot, kb, webhooks, analytics, insights, dea
 def health():
     return {
         "ok": True, "company": settings.company_name, "crm": get_crm().name,
-        "email": "smtp" if settings.smtp_host else "dry_run",
+        "email": active_email_provider(),
         "models": {"orchestrator": settings.model_orchestrator, "worker": settings.model_worker,
                    "fast": settings.model_fast},
     }

@@ -104,6 +104,7 @@ async def build_proposal(
             "brief": brief_to_dict(account.briefs[0] if account.briefs else None),
             "call_summaries": [d.content for d in calls],
             "relationship_history": memory.context_block(account.id, c.id),
+            "products_and_prices": _priced_lines(db, account.id),
         }
         account_id, company = account.id, account.name
 
@@ -148,3 +149,20 @@ async def build_proposal(
         db.add(Activity(contact_id=contact_id, type="proposal_built", detail=p.title))
         db.flush()
         return {"proposal_document_id": proposal.id, "deck_document_id": deck.id, "title": p.title}
+
+
+def _priced_lines(db, account_id: int) -> dict:
+    """The open deal's line items (use these exact products and prices) and the active price list."""
+    from ..models import Opportunity, Product
+    from ..services import salesmgmt
+
+    opp = db.scalar(select(Opportunity).where(Opportunity.account_id == account_id,
+                                              Opportunity.stage.notin_(["closed_won", "closed_lost"]))
+                    .order_by(Opportunity.id.desc()))
+    return {
+        "deal_line_items": salesmgmt.lines_for(db, opp.id) if opp else [],
+        "price_list": [{"name": p.name, "sku": p.sku, "unit_price": p.unit_price, "currency": p.currency,
+                        "billing": p.billing, "description": p.description}
+                       for p in db.scalars(select(Product).where(Product.active.is_(True)))],
+        "rule": "Quote only these products and prices. If there are no line items or price list, do not invent prices.",
+    }

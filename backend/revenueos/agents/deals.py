@@ -1,6 +1,6 @@
 """Deal-stage agents: Meeting Prep (before the call) and Call Analyst (after it)."""
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -8,8 +8,8 @@ from sqlalchemy import select
 
 from ..config import settings
 from ..db import session_scope
-from ..models import Activity, Contact, Opportunity, SalesDocument
-from ..services import approvals, memory
+from ..models import Activity, Contact, Opportunity, SalesDocument, Task
+from ..services import approvals, memory, personalisation
 from ..tools.crm import get_crm
 from .base import WEB_TOOLS, run_agent
 from .shared_tools import brief_to_dict, get_account, get_contact, kb_search
@@ -122,6 +122,8 @@ class CallAnalysis(BaseModel):
     buying_signals: list[str]
     risks: list[str]
     next_steps: list[str] = Field(description="Agreed next steps, each with owner and date if known.")
+    competitors_mentioned: list[str] = Field(default_factory=list,
+                                             description="Other vendors/partners named as alternatives or incumbents.")
     questions_for_next_call: list[str]
     health: Literal["green", "amber", "red"]
     follow_up_email: FollowUp
@@ -184,6 +186,9 @@ async def analyze_call(contact_id: int, transcript: str, parent_run_id: int | No
                               name=f"{account.name} - {datetime.now(timezone.utc):%Y-%m}")
             db.add(opp)
         opp.stage = a.stage
+        opp.owner = opp.owner or c.owner
+        if a.competitors_mentioned:
+            opp.competitors = sorted({*(opp.competitors or []), *[x.strip() for x in a.competitors_mentioned if x.strip()]})
         opp.qualification = a.meddicc.model_dump()
         opp.next_steps, opp.risks, opp.health = a.next_steps, a.risks, a.health
         if a.amount_estimate:
@@ -218,6 +223,14 @@ async def analyze_call(contact_id: int, transcript: str, parent_run_id: int | No
             facts={"commitments": a.next_steps, "risks": a.risks, "buying_signals": a.buying_signals,
                    "objections": [r for r in a.risks if "object" in r.lower()]},
         )
+        for step in a.next_steps[:6]:
+            db.add(Task(type="follow_up", title=step[:255], contact_id=c.id, opportunity_id=opp.id,
+                        owner=c.owner, created_by="call_analyst",
+                        due_at=datetime.now(timezone.utc) + timedelta(days=2),
+                        notes=f"Agreed on the call with {c.full_name}."))
         db.flush()
-        return {"opportunity_id": opp.id, "document_id": doc.id, "approval_id": approval.id,
-                "stage": a.stage, "health": a.health, "summary": a.summary}
+        out = {"opportunity_id": opp.id, "document_id": doc.id, "approval_id": approval.id,
+               "stage": a.stage, "health": a.health, "summary": a.summary}
+    await personalisation.grade_approval(out["approval_id"], f"{json.dumps(context, default=str)}\n{transcript[:40_000]}",
+                                         parent_run_id=result.run_id)
+    return out

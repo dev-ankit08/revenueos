@@ -47,6 +47,12 @@ def handle_reply(db: Session, contact: Contact, text: str, subject: str | None =
                                                Approval.status.in_(["pending", "approved"]))):
         cancelled.append((a.id, a.status))
         a.status, a.review_note = "rejected", "Auto-cancelled: prospect replied."
+    from . import sequences
+
+    if opted_out:
+        sequences.stop_contact(db, contact.id, "Opted out by reply.")
+    else:
+        sequences.pause_contact(db, contact.id, "Prospect replied; waiting for Reply Triage.")
     db.add(Activity(contact_id=contact.id, type="reply", detail=text[:2000]))
     db.commit()
 
