@@ -22,6 +22,7 @@ const LINKS = [
   ["/hygiene", "CRM hygiene"],
   ["/knowledge", "Knowledge base"],
   ["/integrations", "Integrations"],
+  ["/deliverability", "Deliverability"],
   ["/governance", "AI governance"],
   ["/runs", "Activity log"],
   ["/salesops", "Sales setup"],
@@ -33,10 +34,10 @@ export default function Nav() {
   const path = usePathname();
   const [me, setMe] = useState<any>(null);
   useEffect(() => {
-    if (!path.startsWith("/embed") && !path.startsWith("/login")) api("/api/auth/me").then(setMe).catch(() => {});
+    if (!path.startsWith("/embed") && !path.startsWith("/login") && !path.startsWith("/addin") && !path.startsWith("/room")) api("/api/auth/me").then(setMe).catch(() => {});
   }, [path]);
 
-  if (path.startsWith("/embed") || path.startsWith("/login")) return null; // no app chrome there
+  if (path.startsWith("/embed") || path.startsWith("/login") || path.startsWith("/addin") || path.startsWith("/room")) return null; // no app chrome there
 
   async function signOut() {
     try { await post("/api/auth/logout"); } catch {}

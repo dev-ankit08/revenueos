@@ -212,8 +212,8 @@ def check_draft(
     if kind in ("email", "linkedin_message") and words > 200:
         flags.append({"severity": "warn", "code": "too_long", "message": f"{words} words; cold outreach performs best under 150."})
     check_body, check_subject = body, subject
-    if kind == "nurture_email":  # templates may use merge fields; anything else is still a placeholder
-        merge = re.compile(r"\{\{\s*(first_name|last_name|company|title)\s*\}\}")
+    if kind in ("nurture_email", "meeting_reminder"):  # templates may use merge fields; anything else is a placeholder
+        merge = re.compile(r"\{\{\s*(first_name|last_name|company|title|meeting_time|meeting_title)\s*\}\}")
         check_body, check_subject = merge.sub("x", body), merge.sub("x", subject or "")
     if _PLACEHOLDER.search(check_body) or (check_subject and _PLACEHOLDER.search(check_subject)):
         flags.append({"severity": "block", "code": "placeholder", "message": "Unfilled placeholder in draft."})
@@ -263,3 +263,35 @@ def compliance_footer(email: str | None = None) -> str:
     line = (f"If you'd rather not hear from me, reply \"unsubscribe\" or click {url}" if url
             else "If you'd rather not hear from me, just reply \"unsubscribe\".")
     return f"\n\n--\n{settings.company_name} · {settings.physical_address}\n{line}"
+
+
+STALE_FOLLOW_UP = ("just checking in", "just following up", "bumping this", "circling back", "touching base",
+                   "following up on my last", "did you get a chance", "any update on", "floating this")
+
+
+def followup_problems(db: Session, contact: Contact | None, sequence_step: int, body: str) -> list[str]:
+    """A follow-up must add something new. Flags one that repeats an earlier step of the same contact's
+    outreach (40%+ of its 5-word phrases) or leans on "just checking in" filler."""
+    if not contact or sequence_step <= 1:
+        return []
+    problems = []
+    low = body.lower()
+    filler = [p for p in STALE_FOLLOW_UP if p in low]
+    if filler:
+        problems.append(f"uses filler instead of new value (\"{filler[0]}\")")
+
+    def grams(text: str) -> set[tuple[str, ...]]:
+        words = re.findall(r"[a-z0-9']+", text.lower())
+        return {tuple(words[i:i + 5]) for i in range(len(words) - 4)}
+
+    mine = grams(body)
+    if mine:
+        earlier = db.scalars(select(Approval).where(Approval.contact_id == contact.id,
+                                                    Approval.sequence_step < sequence_step,
+                                                    Approval.status.in_(["pending", "approved", "sent"])))
+        for a in earlier:
+            overlap = len(mine & grams(a.body or "")) / len(mine)
+            if overlap >= 0.4:
+                problems.append(f"repeats {overlap:.0%} of step {a.sequence_step}")
+                break
+    return problems

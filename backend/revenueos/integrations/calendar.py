@@ -56,6 +56,9 @@ def upsert_events(db: Session, events: list[dict]) -> dict:
                           account_id=ev.account_id, contact_id=ev.contact_id, occurred_at=ev.starts_at,
                           title=ev.title, processed=True,
                           summary=f"Meeting scheduled: {ev.title} with {', '.join(c.full_name for c in contacts)}")
+            from ..services import pipeline_intel
+
+            pipeline_intel.capture_meeting(db, ev)
         elif ev.prep_status == "pending":
             ev.prep_status = "skipped"  # internal meeting: no customer attendee
     return {"received": len(events), "customer_meetings": matched}

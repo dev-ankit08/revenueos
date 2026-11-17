@@ -72,6 +72,7 @@ class Contact(Base):
     consent_source: Mapped[str | None] = mapped_column(String(255))
     consent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     sla_alerted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    job_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     first_touch_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # first rep touch after MQL
     inbound_message: Mapped[str | None] = mapped_column(Text)
     # Lift measurement: "treatment" gets AI outreach, "holdout" is randomly held back.
@@ -178,6 +179,8 @@ class Approval(Base):
     provider: Mapped[str | None] = mapped_column(String(20))  # smtp|sendgrid|postmark|dry_run
     provider_message_id: Mapped[str | None] = mapped_column(String(255), index=True)
     prompt_version: Mapped[str | None] = mapped_column(String(16), index=True)  # of the agent run that wrote it
+    mailbox_id: Mapped[int | None] = mapped_column(ForeignKey("sending_mailboxes.id"), index=True)  # who sent it
+    voice_applied: Mapped[bool | None] = mapped_column(Boolean)  # written in the owner's Rep Voice
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # social posts published by RevenueOS
     published_url: Mapped[str | None] = mapped_column(String(500))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -353,6 +356,13 @@ class Opportunity(Base):
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     owner: Mapped[str | None] = mapped_column(String(120), index=True)  # rep's email or name
     deal_type: Mapped[str | None] = mapped_column(String(12))  # new | renewal | upsell
+    # Forecasting: the rep's own call (commit|best_case|pipeline|omitted), how often the close date moved later,
+    # and the slip predictor's verdict (services/pipeline_intel.py).
+    rep_forecast_category: Mapped[str | None] = mapped_column(String(12))
+    close_date_pushes: Mapped[int | None] = mapped_column(Integer, default=0)
+    slip_risk: Mapped[str | None] = mapped_column(String(8))
+    slip_reasons: Mapped[list | None] = mapped_column(JSON)
+    slip_flagged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Why it was won or lost (services/salesmgmt.CLOSE_REASONS) and who we were up against.
     close_reason: Mapped[str | None] = mapped_column(String(40))
     close_reason_detail: Mapped[str | None] = mapped_column(Text)
@@ -378,6 +388,13 @@ class StageChange(Base):
     changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     opportunity: Mapped[Opportunity] = relationship(back_populates="stage_changes")
+
+
+@event.listens_for(Opportunity.close_date, "set")
+def _count_close_date_pushes(target: Opportunity, value, oldvalue, initiator):
+    old = oldvalue if isinstance(oldvalue, str) else None
+    if old and value and value > old:
+        target.close_date_pushes = (target.close_date_pushes or 0) + 1
 
 
 @event.listens_for(Opportunity.stage, "set")
@@ -512,6 +529,11 @@ class CalendarEvent(Base):
     # After the meeting: fetch its transcript from Teams/Meet. none|pending|done|unavailable
     transcript_status: Mapped[str | None] = mapped_column(String(12))
     prep_document_id: Mapped[int | None] = mapped_column(ForeignKey("sales_documents.id"))
+    # Meeting-to-pipeline: what happened, which deal it belongs to, reminder and CRM logging.
+    outcome: Mapped[str | None] = mapped_column(String(20))  # held|no_show|qualified|next_step_booked|cancelled|rescheduled
+    opportunity_id: Mapped[int | None] = mapped_column(ForeignKey("opportunities.id"))
+    reminder_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    crm_logged: Mapped[bool | None] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -744,6 +766,161 @@ class CampaignSpend(Base):
     amount: Mapped[float] = mapped_column(Float)
     impressions: Mapped[int | None] = mapped_column(Integer)
     clicks: Mapped[int | None] = mapped_column(Integer)
+
+
+class BuyerRoom(Base):
+    """A private page per deal for the buying committee (services/buyer_rooms.py), opened through a secret link."""
+
+    __tablename__ = "buyer_rooms"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    token: Mapped[str] = mapped_column(String(64), unique=True)
+    opportunity_id: Mapped[int] = mapped_column(ForeignKey("opportunities.id"), index=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"))
+    title: Mapped[str] = mapped_column(String(255))
+    summary: Mapped[str | None] = mapped_column(Text)
+    welcome_note: Mapped[str | None] = mapped_column(Text)
+    documents: Mapped[list | None] = mapped_column(JSON)      # SalesDocument ids (proposal, deck)
+    case_studies: Mapped[list | None] = mapped_column(JSON)   # KBDocument ids
+    allow_pricing: Mapped[bool] = mapped_column(Boolean, default=False)
+    status: Mapped[str] = mapped_column(String(12), default="active")  # active|archived
+    created_by: Mapped[str | None] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_viewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    steps: Mapped[list["RoomStep"]] = relationship(cascade="all, delete-orphan")
+    views: Mapped[list["RoomView"]] = relationship(cascade="all, delete-orphan")
+    questions: Mapped[list["RoomQuestion"]] = relationship(cascade="all, delete-orphan")
+
+
+class RoomStep(Base):
+    """One step of the mutual action plan."""
+
+    __tablename__ = "room_steps"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    room_id: Mapped[int] = mapped_column(ForeignKey("buyer_rooms.id"), index=True)
+    position: Mapped[int] = mapped_column(Integer)
+    title: Mapped[str] = mapped_column(String(255))
+    owner_side: Mapped[str] = mapped_column(String(8), default="both")  # us|them|both
+    owner_name: Mapped[str | None] = mapped_column(String(255))
+    due_date: Mapped[str | None] = mapped_column(String(10))
+    status: Mapped[str] = mapped_column(String(8), default="open")  # open|done
+    done_by: Mapped[str | None] = mapped_column(String(255))
+    done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    comment: Mapped[str | None] = mapped_column(Text)
+
+
+class RoomView(Base):
+    __tablename__ = "room_views"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    room_id: Mapped[int] = mapped_column(ForeignKey("buyer_rooms.id"), index=True)
+    visitor: Mapped[str] = mapped_column(String(255))
+    contact_id: Mapped[int | None] = mapped_column(ForeignKey("contacts.id"))
+    section: Mapped[str] = mapped_column(String(40))
+    seconds: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class RoomQuestion(Base):
+    __tablename__ = "room_questions"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    room_id: Mapped[int] = mapped_column(ForeignKey("buyer_rooms.id"), index=True)
+    visitor: Mapped[str] = mapped_column(String(255))
+    question: Mapped[str] = mapped_column(Text)
+    answer: Mapped[str | None] = mapped_column(Text)  # None = waiting for the rep
+    answered_by: Mapped[str | None] = mapped_column(String(255))  # assistant | rep name
+    sources: Mapped[list | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class KBDraft(Base):
+    """A knowledge-base document drafted from the company website, waiting for a person to approve it."""
+
+    __tablename__ = "kb_drafts"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    category: Mapped[str] = mapped_column(String(40))
+    title: Mapped[str] = mapped_column(String(255))
+    content: Mapped[str] = mapped_column(Text)
+    source_urls: Mapped[list | None] = mapped_column(JSON)
+    website: Mapped[str | None] = mapped_column(String(500))
+    status: Mapped[str] = mapped_column(String(12), default="pending")  # pending|approved|rejected
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ContactSuggestion(Base):
+    """Someone worth adding: a colleague copied on a customer thread, or a past contact who changed company.
+    Never created as a contact automatically; a person clicks Add."""
+
+    __tablename__ = "contact_suggestions"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    email: Mapped[str | None] = mapped_column(String(255), index=True)
+    name: Mapped[str | None] = mapped_column(String(255))
+    account_id: Mapped[int | None] = mapped_column(ForeignKey("accounts.id"))
+    new_company_domain: Mapped[str | None] = mapped_column(String(255))  # job changes
+    seen_with_contact_id: Mapped[int | None] = mapped_column(ForeignKey("contacts.id"))
+    source: Mapped[str] = mapped_column(String(30))  # email thread | job change
+    reason: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(12), default="pending")  # pending|added|dismissed
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ForecastSnapshot(Base):
+    """The forecast as it stood each week, so it can be scored against what actually closed."""
+
+    __tablename__ = "forecast_snapshots"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    period: Mapped[str] = mapped_column(String(10), index=True)
+    taken_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    commit: Mapped[float] = mapped_column(Float, default=0)
+    best_case: Mapped[float] = mapped_column(Float, default=0)
+    weighted: Mapped[float] = mapped_column(Float, default=0)
+    won_to_date: Mapped[float] = mapped_column(Float, default=0)
+    deals: Mapped[dict | None] = mapped_column(JSON)
+
+
+class RepVoice(Base):
+    """A rep's writing style (services/voice.py), built with their consent from emails they wrote."""
+
+    __tablename__ = "rep_voices"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    owner: Mapped[str] = mapped_column(String(120), unique=True)  # rep email, as on Contact.owner
+    profile: Mapped[dict | None] = mapped_column(JSON)
+    sample_count: Mapped[int] = mapped_column(Integer, default=0)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    consented_by: Mapped[str | None] = mapped_column(String(255))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class SendingMailbox(Base):
+    """One address in the sending pool (services/deliverability.py): daily cap, warm-up and health."""
+
+    __tablename__ = "sending_mailboxes"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    address: Mapped[str] = mapped_column(String(255), unique=True)
+    # smtp|sendgrid|postmark: through the workspace's sending service, From = address.
+    # google|microsoft: through the rep's own connected mailbox (connection_id).
+    provider: Mapped[str] = mapped_column(String(20), default="smtp")
+    connection_id: Mapped[int | None] = mapped_column(ForeignKey("connections.id"))
+    owner: Mapped[str | None] = mapped_column(String(120))
+    daily_cap: Mapped[int] = mapped_column(Integer, default=40)
+    warmup_days: Mapped[int] = mapped_column(Integer, default=21)  # 0 = already warm
+    warmup_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(12), default="warming")  # warming|active|paused|removed
+    paused_reason: Mapped[str | None] = mapped_column(Text)
+    paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class PlacementTest(Base):
+    """An inbox placement test: test emails from each mailbox to the team's own inboxes, then where they landed."""
+
+    __tablename__ = "placement_tests"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    token: Mapped[str] = mapped_column(String(20), index=True)
+    status: Mapped[str] = mapped_column(String(12), default="sent")  # sent|pending|checked
+    results: Mapped[list | None] = mapped_column(JSON)
+    placement_pct: Mapped[float | None] = mapped_column(Float)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class PromptVersion(Base):

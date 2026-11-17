@@ -193,15 +193,23 @@ def claim_and_send(db: Session, approval: Approval, *, from_status: str, commit:
     cap_error = guardrails.send_capacity_error(db, approval.contact.email)
     if cap_error:
         raise ApprovalError(cap_error)
+    from . import deliverability
+
+    try:  # the sending pool: a mailbox with room today (automated sends also keep a gap between sends)
+        mailbox = deliverability.pick_mailbox(db, automated=commit)
+    except deliverability.NoSendingCapacity as exc:
+        raise ApprovalError(str(exc)) from None
     now = datetime.now(timezone.utc)
     res = db.execute(
         update(Approval).where(Approval.id == approval.id, Approval.status == from_status)
-        .values(status="sending", claimed_at=now).execution_options(synchronize_session=False)
+        .values(status="sending", claimed_at=now, mailbox_id=mailbox.id if mailbox else None)
+        .execution_options(synchronize_session=False)
     )
     if res.rowcount != 1:
         db.refresh(approval)
         return False
     approval.status, approval.claimed_at = "sending", now
+    approval.mailbox_id = mailbox.id if mailbox else None
     if commit:
         db.commit()
     _send(db, approval)
@@ -235,8 +243,14 @@ def _send(db: Session, approval: Approval) -> Approval:
     body = utm.tag_links(approval.body, campaign=_utm_campaign(db, approval), medium="email",
                          content=f"approval-{approval.id}")
     try:
+        sender = None
+        if approval.mailbox_id:
+            from ..models import SendingMailbox
+            from ..tools.email import sender_for
+
+            sender = sender_for(db, db.get(SendingMailbox, approval.mailbox_id))
         result = send_email(contact.email, approval.subject or "", body + guardrails.compliance_footer(contact.email),
-                            approval_id=approval.id)
+                            approval_id=approval.id, sender=sender)
     except Exception as exc:  # transport failure: keep the draft, surface the error
         approval.status = "failed"
         approval.review_note = f"Send failed: {exc}"

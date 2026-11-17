@@ -132,7 +132,11 @@ def digest_for(db: Session, owner: str) -> str | None:
     if tasks:
         lines.append(f"- {len(tasks)} task(s) due: " + "; ".join(t.title for t in tasks[:5]))
     if drafts:
-        lines.append(f"- {len(drafts)} draft(s) to review in Approvals")
+        lines.append(f"- {len(drafts)} draft(s) to review" + (" (the first few are below; approve straight from here)"
+                                                               if len(drafts) else ""))
+        from .emailapprove import digest_lines
+
+        lines += digest_lines(db, owner)
     if settings.app_base_url:
         lines.append(f"{settings.app_base_url.rstrip('/')}/today")
     return "\n".join(lines)

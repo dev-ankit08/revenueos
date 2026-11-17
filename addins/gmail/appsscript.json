@@ -1,0 +1,18 @@
+{
+  "timeZone": "Etc/UTC",
+  "exceptionLogging": "STACKDRIVER",
+  "runtimeVersion": "V8",
+  "oauthScopes": [
+    "https://www.googleapis.com/auth/gmail.addons.execute",
+    "https://www.googleapis.com/auth/gmail.addons.current.message.metadata"
+  ],
+  "addOns": {
+    "common": {
+      "name": "RevenueOS",
+      "logoUrl": "https://revenueos.example.com/icon-128.png"
+    },
+    "gmail": {
+      "contextualTriggers": [{ "unconditional": {}, "onTriggerFunction": "onGmailMessage" }]
+    }
+  }
+}

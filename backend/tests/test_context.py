@@ -256,7 +256,9 @@ async def test_personalisation_gate_rewrites_once_then_flags(seeded, monkeypatch
     assert "NOT queued" in str(first) and "forecasting" in str(first)
     second = await tool.call(args)   # still generic after the rewrite: queued, flagged
     assert "Queued as approval" in str(second)
-    third = await tool.call({**args, "sequence_step": 2, "send_after_days": 3})
+    # A follow-up must add something new (a copy of step 1 is sent back for a rewrite), so step 2 says something else.
+    third = await tool.call({**args, "sequence_step": 2, "send_after_days": 3,
+                             "body": "One more angle: planners trust forecasts sooner when two plants share a data model."})
     with session_scope() as db:
         rows = list(db.scalars(select(Approval).order_by(Approval.id)))
         assert rows[0].personalisation_score == 40

@@ -115,6 +115,12 @@ def record(db: Session, provider: str, events: list[dict]) -> dict:
         db.add(row)
         counts[ev["event"]] = counts.get(ev["event"], 0) + 1
         _act(db, ev["event"], email, contact, row)
+        if ev["event"] in ("bounce", "complaint") and approval and approval.mailbox_id:
+            from ..models import SendingMailbox
+            from . import deliverability
+
+            db.flush()
+            deliverability.evaluate(db, db.get(SendingMailbox, approval.mailbox_id))
     return counts
 
 
@@ -125,6 +131,10 @@ def _act(db: Session, kind: str, email: str, contact: Contact | None, row: Email
             sequences.stop_contact(db, contact.id, SUPPRESSING[kind])
             if kind in ("complaint", "unsubscribe"):
                 contact.status = "disqualified"
+            if kind == "bounce":
+                from .pipeline_intel import bounce_means_left
+
+                bounce_means_left(db, contact)
             db.add(Activity(contact_id=contact.id, type=f"email_{kind}",
                             detail=f"{SUPPRESSING[kind].capitalize()}. Address suppressed. {row.detail or ''}".strip()))
     elif kind == "click" and contact:

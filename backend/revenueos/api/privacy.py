@@ -107,3 +107,60 @@ async def unsubscribe(request: Request, db: Session = Depends(get_db), t: str | 
     if not email:
         return _page("Link not valid", "<p>This unsubscribe link isn't valid.</p>")
     return _page("You're unsubscribed", f"<p>{html.escape(email)} won't receive any more emails from us.</p>")
+
+
+# ------------------------------------------------------------------ approve from email (public, signed links)
+
+def _approval_page(approval_id: int, action: str, r: str, e: int, s: str, db: Session):
+    from ..models import Approval
+    from ..services import emailapprove
+
+    problem = emailapprove.verify(approval_id, action, r, e, s)
+    a = db.get(Approval, approval_id)
+    if problem or not a:
+        return None, problem or "Draft not found."
+    return a, None
+
+
+@router.get("/public/approvals/{approval_id}/{action}")
+def approval_link_page(approval_id: int, action: str, r: str, e: int, s: str, db: Session = Depends(get_db)):
+    """Confirmation page. Nothing changes until the button is clicked (link scanners only ever GET)."""
+    a, problem = _approval_page(approval_id, action, r, e, s, db)
+    if problem:
+        return _page("Link not valid", f"<p>{html.escape(problem)}</p>")
+    if a.status != "pending":
+        return _page("Already decided", f"<p>This draft is already <b>{html.escape(a.status)}</b>.</p>")
+    who = html.escape(a.contact.full_name if a.contact else "")
+    verb = "Approve and send" if action == "approve" else "Reject"
+    reason = ("" if action == "approve" else
+              '<p><select name="reason"><option value="too_generic">Too generic</option><option value="wrong_facts">'
+              'Wrong or unverifiable facts</option><option value="tone">Tone</option><option value="too_long">Too long'
+              '</option><option value="timing">Bad timing</option><option value="other">Other</option></select></p>')
+    body = (f"<p><b>To:</b> {who}<br><b>Subject:</b> {html.escape(a.subject or '')}</p>"
+            f"<pre style='white-space:pre-wrap;background:#f6f6f6;padding:12px;border-radius:6px'>{html.escape(a.body)}</pre>"
+            f"<form method='post'>{reason}<button type='submit'>{verb}</button></form>"
+            "<p style='color:#777'>Want to change the wording? Open it in RevenueOS instead.</p>")
+    return _page(f"{verb}?", body)
+
+
+@router.post("/public/approvals/{approval_id}/{action}")
+async def approval_link_submit(approval_id: int, action: str, request: Request, r: str, e: int, s: str,
+                               db: Session = Depends(get_db)):
+    from ..services import approvals as approvals_svc
+
+    a, problem = _approval_page(approval_id, action, r, e, s, db)
+    if problem:
+        return _page("Link not valid", f"<p>{html.escape(problem)}</p>")
+    reviewer = f"{r} (email link)"
+    try:
+        if action == "approve":
+            approvals_svc.approve_and_send(db, a, reviewer)
+        else:
+            form = await request.form()
+            approvals_svc.reject(db, a, reviewer, "Rejected from email link", form.get("reason") or "other")
+        db.commit()
+    except approvals_svc.ApprovalError as exc:
+        db.commit()
+        return _page("Couldn't do that", f"<p>{html.escape(str(exc))}</p><p>Open the draft in RevenueOS to fix it.</p>")
+    done = {"sent": "Sent.", "approved": "Approved: it goes out on schedule.", "rejected": "Rejected."}.get(a.status, a.status)
+    return _page("Done", f"<p>{html.escape(done)}</p>")

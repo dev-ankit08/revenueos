@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api, post } from "@/lib/api";
 
 /** Owner, funnel stage and data quality for one lead, with enrich / verify actions. */
@@ -7,6 +7,20 @@ export default function LeadData({ id, lead, onDone }: { id: number; lead: any; 
   const [owner, setOwner] = useState(lead.owner ?? "");
   const [basis, setBasis] = useState(lead.lawful_basis ?? "");
   const [msg, setMsg] = useState("");
+  const [note, setNote] = useState("");
+  const [listening, setListening] = useState(false);
+  const [rels, setRels] = useState<any[]>([]);
+  useEffect(() => { api<any[]>(`/api/accounts/${lead.account_id}/relationships`).then(setRels).catch(() => {}); }, [lead.account_id]);
+
+  function dictate() {
+    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SR) return setMsg("Voice typing isn't supported in this browser; type the note instead.");
+    const r = new SR();
+    r.lang = "en-US"; r.interimResults = false;
+    r.onresult = (e: any) => setNote((n) => `${n} ${e.results[0][0].transcript}`.trim());
+    r.onend = () => setListening(false);
+    setListening(true); r.start();
+  }
 
   async function run(label: string, fn: () => Promise<any>) {
     setMsg(`${label}…`);
@@ -14,6 +28,29 @@ export default function LeadData({ id, lead, onDone }: { id: number; lead: any; 
   }
 
   return (
+    <>
+    <div className="card stack" style={{ marginTop: 12 }}>
+      <b>Quick update</b>
+      <div className="muted">After a meeting or call, say or type two lines: what happened and what's next. The deal, next
+        steps, tasks and CRM are updated for you.</div>
+      <textarea rows={2} value={note} placeholder="e.g. Pilot agreed for January, CFO joins next call, budget 80k" onChange={(e) => setNote(e.target.value)} />
+      <div className="row">
+        <button onClick={dictate} disabled={listening}>{listening ? "Listening…" : "🎤 Speak"}</button>
+        <button className="primary" disabled={note.trim().length < 5} onClick={() => run("Updating the deal", async () => {
+          await post(`/api/leads/${id}/quick-update`, { note });
+          setNote("");
+          return "Updating the deal and CRM; refresh in a minute.";
+        })}>Update deal</button>
+      </div>
+    </div>
+    {rels.length > 0 && (
+      <div className="card" style={{ marginTop: 12 }}>
+        <b>Who knows whom here</b>
+        <ul style={{ margin: "6px 0 0" }}>{rels.slice(0, 6).map((r, i) => (
+          <li key={i}>{r.rep} ↔ {r.contact} <span className="muted">({r.level}: {r.meetings} meetings, {r.emails} emails)</span></li>
+        ))}</ul>
+      </div>
+    )}
     <div className="card row" style={{ marginTop: 12, justifyContent: "space-between", flexWrap: "wrap" }}>
       <div className="row" style={{ flexWrap: "wrap" }}>
         <span>Stage: <b>{(lead.lifecycle ?? "lead").toUpperCase()}</b></span>
@@ -49,5 +86,6 @@ export default function LeadData({ id, lead, onDone }: { id: number; lead: any; 
         {msg && <span className="muted">{msg}</span>}
       </div>
     </div>
+    </>
   );
 }

@@ -81,6 +81,8 @@ def _deal_context(db, o: Opportunity) -> dict:
         "opportunity": {"id": o.id, "name": o.name, "stage": o.stage, "amount": o.amount, "close_date": o.close_date,
                         "meddicc": o.qualification, "next_steps": o.next_steps, "risks": o.risks,
                         "competitors": o.competitors or [], "owner": o.owner,
+                        "buying_group_coverage": _coverage(db, o.account_id),
+                        "buyer_room": _room(db, o.id),
                         "line_items": _lines(db, o.id),
                         "our_record_vs_these_competitors": _competitor_record(db, o.competitors or []),
                         "days_since_activity": (now - last).days, "proposal_sent": has_proposal,
@@ -225,6 +227,14 @@ async def forecast(target: float | None = None, parent_run_id: int | None = None
     target = target or settings.quarterly_target or None
     with session_scope() as db:
         numbers = insights.forecast_numbers(db, target)
+        from ..services import pipeline_intel
+
+        numbers["likely_to_slip"] = [{"deal": o.name, "amount": o.amount, "why": o.slip_reasons}
+                                     for o in db.scalars(select(Opportunity).where(Opportunity.slip_risk == "high"))]
+        last = db.scalar(select(SalesDocument.id))  # noqa: F841  (keeps session warm for the lazy loads above)
+        prev_q = pipeline_intel.accuracy(db, _previous_quarter(numbers["quarter"]))
+        if prev_q:
+            numbers["last_quarter_forecast_accuracy"] = prev_q["mid_quarter_accuracy"]
     result = await run_agent(
         agent="forecast_analyst",
         model=settings.model_orchestrator,
@@ -421,3 +431,26 @@ def _competitor_record(db, competitors: list[str]) -> dict:
     from ..services import salesmgmt
 
     return {c: salesmgmt.record_against(db, c) for c in competitors}
+
+
+def _previous_quarter(period: str) -> str:
+    year, q = int(period[:4]), int(period[-1])
+    return f"{year - 1}-Q4" if q == 1 else f"{year}-Q{q - 1}"
+
+
+def _coverage(db, account_id: int) -> dict:
+    from ..services.buyer_rooms import coverage
+
+    return coverage(db, account_id)
+
+
+def _room(db, opp_id: int) -> dict | None:
+    from ..models import BuyerRoom
+    from ..services.buyer_rooms import engagement
+
+    room = db.scalar(select(BuyerRoom).where(BuyerRoom.opportunity_id == opp_id, BuyerRoom.status == "active"))
+    if not room:
+        return None
+    e = engagement(db, room)
+    return {"visitors": [{k: v[k] for k in ("visitor", "visits", "minutes", "last")} for v in e["visitors"]],
+            "plan_progress": e["plan_progress"], "open_questions": e["open_questions"]}

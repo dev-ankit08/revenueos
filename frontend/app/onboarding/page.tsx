@@ -54,6 +54,20 @@ export default function Onboarding() {
       <h1>Setup checklist</h1>
       <p className="sub">{status.complete ? "Ready. Every required step is done." : "Six steps to a working pilot. Each one can be revisited any time."}</p>
 
+      {status.first_hour && (
+        <div className="card stack" style={{ marginBottom: 16 }}>
+          <b>Your first hour</b>
+          <div className="muted">The fastest path to real drafts for real leads.</div>
+          {status.first_hour.map((s: any, i: number) => (
+            <div key={s.key}>{s.done ? "✓" : `${i + 1}.`} {s.title} {s.detail && <span className="muted">· {s.detail}</span>}
+              {!s.done && s.key === "sending" && <> · <a href="/deliverability">open Deliverability</a></>}
+              {!s.done && s.key === "kb_site" && <> · <a href="/knowledge">build from your website</a></>}
+              {!s.done && s.key === "first_drafts" && <> · <a href="/approvals">open Approvals</a></>}
+            </div>
+          ))}
+        </div>
+      )}
+
       <Head k="company" n={1} />
       <form className="card grid" onSubmit={(e) => { e.preventDefault(); saveSettings("company", company); }}>
         <input placeholder="Company name" value={company.company_name} onChange={(e) => setCompany({ ...company, company_name: e.target.value })} />

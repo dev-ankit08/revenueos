@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
-import { api, post } from "@/lib/api";
+import { api, post, waitForRun } from "@/lib/api";
 
 type Doc = { id: number; title: string; category: string; content: string; chunks: number };
 
@@ -60,6 +60,8 @@ export default function Knowledge() {
       <h1>Knowledge base</h1>
       <p className="sub">Everything the agents know about your company. Outreach may only cite facts from here or from account research.</p>
 
+      <KbDrafts onChange={load} />
+
       <form className="card stack" onSubmit={add}>
         <div className="row">
           <input style={{ flex: 2, minWidth: 200 }} placeholder="Title" required value={form.title}
@@ -97,5 +99,50 @@ export default function Knowledge() {
         </div>
       ))}
     </>
+  );
+}
+
+
+function KbDrafts({ onChange }: { onChange: () => void }) {
+  const [drafts, setDrafts] = useState<any[]>([]);
+  const [url, setUrl] = useState("");
+  const [msg, setMsg] = useState("");
+  const load = () => api<any[]>("/api/kb/drafts").then(setDrafts).catch(() => {});
+  useEffect(() => { load(); }, []);
+
+  async function build() {
+    setMsg("Reading your website; this takes 2-4 minutes…");
+    try { const { run_id } = await post("/api/onboarding/kb-from-website", { url }); const r = await waitForRun(run_id); setMsg(r.output ?? r.error ?? "Done"); load(); }
+    catch (e: any) { setMsg(e.message); }
+  }
+  async function decide(id: number, action: string) { await post(`/api/kb/drafts/${id}/${action}`, {}); load(); onChange(); }
+  async function importSequences(file: File) {
+    const fd = new FormData(); fd.append("file", file);
+    try { const r = await api("/api/onboarding/import-sequences", { method: "POST", body: fd }); setMsg(`Imported ${r.steps_imported} sequence steps as a playbook.`); onChange(); }
+    catch (e: any) { setMsg(e.message); }
+  }
+
+  return (
+    <div className="card stack" style={{ marginBottom: 16 }}>
+      <b>Start from your website</b>
+      <div className="muted">RevenueOS reads your site and drafts your offering, ideal customers, personas, brand voice and case studies,
+        each citing the pages it came from. Nothing goes live until you approve it.</div>
+      <div className="row">
+        <input style={{ maxWidth: 320 }} placeholder="https://www.yourcompany.com" value={url} onChange={(e) => setUrl(e.target.value)} />
+        <button className="primary" disabled={!url} onClick={build}>Build drafts</button>
+        <label className="btn">Import sequences CSV (Outreach, Salesloft, HubSpot)
+          <input type="file" accept=".csv" hidden onChange={(e) => e.target.files?.[0] && importSequences(e.target.files[0])} /></label>
+        {msg && <span className="muted">{msg}</span>}
+      </div>
+      {drafts.map((d) => (
+        <details className="card" key={d.id}>
+          <summary><span className="pill">{d.category.replace("_", " ")}</span> <b>{d.title}</b></summary>
+          <div style={{ whiteSpace: "pre-wrap", marginTop: 8 }}>{d.content}</div>
+          <div className="muted">Sources: {(d.source_urls ?? []).join(", ")}</div>
+          <div className="row"><button className="primary" onClick={() => decide(d.id, "approve")}>Approve</button>
+            <button className="danger" onClick={() => decide(d.id, "reject")}>Reject</button></div>
+        </details>
+      ))}
+    </div>
   );
 }

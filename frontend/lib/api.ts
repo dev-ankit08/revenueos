@@ -18,7 +18,7 @@ export async function api<T = any>(path: string, init: RequestInit = {}): Promis
   if (token) headers["Authorization"] = `Bearer ${token}`;
   const res = await fetch(`${API_URL}${path}`, { ...init, headers, cache: "no-store" });
   const data = await res.json().catch(() => ({}));
-  if (res.status === 401 && typeof window !== "undefined" && !window.location.pathname.startsWith("/login")
+  if (res.status === 401 && typeof window !== "undefined" && !window.location.pathname.startsWith("/login") && !window.location.pathname.startsWith("/addin") && !window.location.pathname.startsWith("/room")
       && !window.location.pathname.startsWith("/embed")) {
     window.location.href = "/login";
   }

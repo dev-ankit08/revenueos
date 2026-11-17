@@ -207,7 +207,8 @@ def upcoming_meetings(db: Session = Depends(get_db)):
     rows = db.scalars(select(CalendarEvent).where(CalendarEvent.contact_id.isnot(None))
                       .order_by(CalendarEvent.starts_at.desc()).limit(50))
     return [{"id": e.id, "title": e.title, "starts_at": e.starts_at, "contact_id": e.contact_id,
-             "prep_status": e.prep_status, "prep_document_id": e.prep_document_id} for e in rows]
+             "prep_status": e.prep_status, "prep_document_id": e.prep_document_id, "outcome": e.outcome,
+             "reminder_sent_at": e.reminder_sent_at} for e in rows]
 
 
 # ------------------------------------------------------------------ timeline, notes, unmatched

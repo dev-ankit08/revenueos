@@ -373,6 +373,8 @@ def draft_quality(db: Session, days: int = 90) -> dict:
         "by_agent": {agent: summarise(items) for agent, items in sorted(by_agent.items())},
         "by_prompt_version": {k: summarise(v) for k, v in sorted(by_prompt.items())},
         "grader_calibration": grader_calibration(rows),
+        "rep_voice": {"with_voice": summarise([a for a in rows if a.voice_applied]),
+                      "without_voice": summarise([a for a in rows if not a.voice_applied])},
         "reason_labels": {**REJECT_REASONS, "unspecified": "No reason given"},
     }
 

@@ -167,6 +167,12 @@ async def draft_reply(
     history = memory.context_block(account_id, contact_id)
     if history:
         prompt += "\n\n" + history
+    from ..services import voice
+
+    with session_scope() as db:
+        style = voice.instructions_for(db, db.get(Contact, contact_id).owner)
+    if style:
+        prompt += "\n\n" + style
     if settings.booking_url and t.category in ("interested", "question", "objection", "not_now"):
         prompt += (f"\n\nMEETING BOOKING LINK: {settings.booking_url}\nIf they are open to a conversation, offer this "
                    "link as the easy way to pick a time (copy it exactly). Do not propose specific times yourself.")
@@ -178,7 +184,7 @@ async def draft_reply(
         role_prompt=DRAFT_ROLE,
         prompt=prompt,
         tools=[get_contact, get_account, kb_search,
-               make_queue_tool({contact_id}, run_id, grounding, agent_name="reply_writer")],
+               make_queue_tool({contact_id}, run_id, grounding, agent_name="reply_writer", voice_on=bool(style))],
         effort="medium",
         run_id=run_id,
     )

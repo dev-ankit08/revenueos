@@ -26,6 +26,10 @@ const GROUPS: [string, [string, string][]][] = [
     ["intent_create_accounts", "Create accounts from strong intent (true / false)"],
     ["event_engaged_minutes", "Event: minutes attended to count as engaged"], ["renewal_lead_days", "Open renewal deals N days before end"],
     ["linkedin_access_token", "LinkedIn access token (publishing)"], ["linkedin_author_urn", "LinkedIn author (urn:li:organization:...)"]]],
+  ["ROI statement and reminders", [["roi_recipients", "ROI statement recipients (comma-separated emails)"],
+    ["roi_hourly_cost", "Loaded hourly cost (to value time saved)"], ["roi_minutes", "Minutes saved per task (JSON overrides)"],
+    ["meeting_reminder_hours", "Meeting reminder: hours before"], ["mailbox_daily_cap", "Default emails per mailbox per day"],
+    ["primary_domain", "Main company domain (don't cold-email from it)"]]],
   ["Notifications and privacy", [["digest_hour", "Daily digest hour, local time (-1 = off)"], ["alert_email", "Ops alerts email"],
     ["consent_required_countries", "Countries needing a lawful basis (comma-separated)"]]],
   ["Funnel and research", [["mql_score", "MQL score threshold (0-100)"], ["mql_sla_hours", "MQL first-touch SLA (hours)"],
@@ -98,6 +102,7 @@ export default function Settings() {
       </div>
 
       <Security />
+      <Voice />
       <Privacy />
 
       <h2>People</h2>
@@ -200,6 +205,50 @@ function Privacy() {
         <button disabled={!email} onClick={exportData}>Export their data</button>
         <button className="danger" disabled={!email} onClick={erase}>Erase their data</button>
         {msg && <span className="muted">{msg}</span>}
+      </div>
+    </>
+  );
+}
+
+function Voice() {
+  const [me, setMe] = useState<any>(null);
+  const [voices, setVoices] = useState<any[]>([]);
+  const [msg, setMsg] = useState("");
+  const load = () => {
+    api("/api/auth/me").then(setMe).catch(() => {});
+    api<any[]>("/api/voice").then(setVoices).catch(() => {});
+  };
+  useEffect(() => { load(); }, []);
+  const email = me?.user?.email?.toLowerCase();
+  if (!email) return null;
+  const mine = voices.find((v) => v.owner === email);
+
+  async function act(path: string, ok: string) {
+    setMsg("");
+    try { const r = await post(path); setMsg(r.run_id ? "Learning your style from your sent emails; this takes about a minute." : ok); setTimeout(load, 1500); }
+    catch (e: any) { setMsg(e.message); }
+  }
+
+  return (
+    <>
+      <h2>Your writing voice</h2>
+      <div className="card stack" style={{ maxWidth: 640 }}>
+        <div className="muted">Drafts for your leads can sound like you: RevenueOS learns your length, greeting, sign-off and tone
+          from emails you wrote (your connected mailbox, and drafts you rewrote). Only the style is kept, not the emails.</div>
+        {mine?.profile && (
+          <div>
+            <b>{mine.enabled ? "On" : "Off"}</b>, learned from {mine.samples} emails: {mine.profile.summary}
+            <div className="muted">Greeting "{mine.profile.greeting}", sign-off "{mine.profile.sign_off}", about {mine.profile.typical_length_words} words.</div>
+          </div>
+        )}
+        <div className="row">
+          <button className="primary" onClick={() => act(`/api/voice/${encodeURIComponent(email)}/build`, "")}>
+            {mine ? "Relearn my style" : "Learn my writing style"}</button>
+          {mine && <button onClick={() => act(`/api/voice/${encodeURIComponent(email)}/${mine.enabled ? "disable" : "enable"}`, "Updated.")}>
+            {mine.enabled ? "Turn off" : "Turn on"}</button>}
+          {mine && <button className="danger" onClick={() => act(`/api/voice/${encodeURIComponent(email)}/delete`, "Deleted.")}>Delete</button>}
+        </div>
+        {msg && <div className="muted">{msg}</div>}
       </div>
     </>
   );

@@ -9,7 +9,8 @@ from fastapi.responses import JSONResponse
 
 from . import jobs
 from .api import (analytics, approvals, copilot, deals, evaluation, insights, integrations, kb, leads, marketing,
-                  growth, myday, nurture, onboarding, privacy, salesmgmt, sequences, webhooks, workspace)
+                  deliverability, growth, myday, nurture, onboarding, pipeline, privacy, rooms, salesmgmt,
+                  sequences, voice, webhooks, workspace)
 from .config import settings
 from .db import current_workspace, init_db
 from .integrations import slack_bot  # noqa: F401  (registers the Slack approval hook)
@@ -112,7 +113,8 @@ async def workspace_and_auth(request: Request, call_next):
 
 
 for module in (leads, approvals, copilot, kb, webhooks, analytics, insights, deals, marketing, integrations,
-               workspace, onboarding, evaluation, sequences, myday, salesmgmt, nurture, privacy, growth):
+               workspace, onboarding, evaluation, sequences, myday, salesmgmt, nurture, privacy, growth,
+               deliverability, voice, pipeline, rooms):
     app.include_router(module.router)
 
 

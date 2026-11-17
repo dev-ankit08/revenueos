@@ -126,6 +126,8 @@ def opp_to_dict(o: Opportunity) -> dict:
             "risks": o.risks, "account": o.account.name, "account_id": o.account_id,
             "primary_contact_id": o.primary_contact_id, "sf_id": o.sf_id, "crm_id": o.crm_id,
             "last_activity_at": o.last_activity_at, "owner": o.owner, "close_reason": o.close_reason,
+            "slip_risk": o.slip_risk, "slip_reasons": o.slip_reasons or [], "close_date_pushes": o.close_date_pushes or 0,
+            "rep_forecast_category": o.rep_forecast_category,
             "close_reason_detail": o.close_reason_detail, "competitors": o.competitors or []}
 
 

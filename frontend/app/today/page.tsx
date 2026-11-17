@@ -18,6 +18,16 @@ export default function MyDay() {
   const [data, setData] = useState<any>(null);
   const [mine, setMine] = useState(false);
   const [error, setError] = useState("");
+  const [suggestions, setSuggestions] = useState<any[]>([]);
+  const [slips, setSlips] = useState<any[]>([]);
+  const loadExtras = () => {
+    api<any[]>("/api/suggestions").then(setSuggestions).catch(() => {});
+    api<any[]>("/api/deals/slip-risk").then((x) => setSlips(x.filter((d) => d.risk === "high"))).catch(() => {});
+  };
+  useEffect(loadExtras, []);
+  async function suggestion(id: number, action: string) {
+    try { await api(`/api/suggestions/${id}/${action}`, { method: "POST" }); loadExtras(); } catch (e: any) { setError(e.message); }
+  }
 
   useEffect(() => { try { setMine(localStorage.getItem(MINE_KEY) === "1"); } catch {} }, []);
   const load = () => api(`/api/my-day?mine=${mine}`).then(setData).catch((e) => setError(e.message));
@@ -61,6 +71,26 @@ export default function MyDay() {
               <td>{b.lifecycle?.toUpperCase()}</td><td className="error">{b.hours_waiting} h</td><td>{b.owner ?? "–"}</td></tr>
           ))}
         </tbody></table>
+      </Section>
+
+      <Section title="Deals likely to slip" count={slips.length}>
+        <table><thead><tr><th>Deal</th><th>Close</th><th>Why</th></tr></thead><tbody>
+          {slips.map((d) => <tr key={d.opportunity_id}><td>{d.name}</td><td>{d.close_date ?? "–"}</td>
+            <td className="muted">{d.reasons.join("; ")}</td></tr>)}
+        </tbody></table>
+      </Section>
+
+      <Section title="People to add" count={suggestions.length}>
+        <div className="stack">{suggestions.slice(0, 10).map((s) => (
+          <div className="card row" key={s.id} style={{ justifyContent: "space-between" }}>
+            <div><b>{s.name ?? s.email}</b> {s.email && <span className="muted">{s.email}</span>}
+              <div className="muted">{s.reason}{s.new_company_domain ? ` · now at ${s.new_company_domain}` : ""}</div></div>
+            <div className="row">
+              {s.email && <button className="primary" onClick={() => suggestion(s.id, "add")}>Add</button>}
+              <button onClick={() => suggestion(s.id, "dismiss")}>Dismiss</button>
+            </div>
+          </div>
+        ))}</div>
       </Section>
 
       <Section title="Hot replies (last 7 days)" count={data.hot_replies.length}>

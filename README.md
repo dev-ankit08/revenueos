@@ -114,6 +114,27 @@ Privacy: internal team text is never shown to customers. A guardrail **blocks** 
 - **Privacy:** a personal one-click unsubscribe link in every email (and `List-Unsubscribe-Post`), lawful basis per contact (required in `CONSENT_REQUIRED_COUNTRIES`), data export and erasure on **Settings**, and automatic clean-up of AI run logs and rejected drafts.
 - **Dependencies:** `backend/requirements.lock` pins the exact versions this release was tested with.
 
+**Built from what customers struggle with** (the research, sources and plan are in [docs/PRODUCT_PLAN.md](docs/PRODUCT_PLAN.md))
+
+*Trusted delivery and adoption*
+- **Deliverability Guardian** (**Deliverability** page): a pool of sending mailboxes (your sending service, or reps' own connected Gmail/Outlook), each with a daily cap (default 40), a 21-day warm-up ramp and a gap between automated sends. A mailbox pauses itself when spam complaints pass 0.1% or bounces pass 2% (or 2 complaints / 5 bounces in a week) and alerts the team. A DNS check scores SPF, DKIM, DMARC and MX with plain-English fixes and warns against cold email from your main domain. Inbox placement tests send from every mailbox to your own connected inboxes and report inbox / promotions / spam. With no pool configured, sending works as before.
+- **Approve from email**: the morning digest lists each rep's waiting drafts with signed Approve / Reject links (72 hours, one draft, one reviewer). A link opens a confirmation page; nothing changes until the button is clicked, so email security scanners can't approve anything.
+- **Outlook and Gmail add-ins** (`addins/`): the RevenueOS panel beside the email the rep is reading. **Installable app**: add RevenueOS to a phone's home screen (opens on My day).
+- **Rep Voice** (**Settings → Your writing voice**): with the rep's consent, drafts for their leads follow their own style (length, greeting, sign-off, tone), learned from emails they wrote. Insights compares edits with and without it.
+- **Follow-up value check**: a follow-up that repeats 40%+ of an earlier step or leans on "just checking in" goes back to the writer once, then is flagged.
+
+*Zero admin, fewer surprises*
+- **Zero-entry CRM**: emails reps send themselves and customer meetings are logged to the CRM automatically; colleagues the customer copies in are suggested as new contacts (My day → People to add). **Quick update** on a lead's page: speak or type two lines after a meeting and the deal, next steps, tasks and CRM update (no follow-up email drafted).
+- **Forecast calibration**: a weekly snapshot of the forecast; after the quarter, accuracy of each snapshot and how often "commit" deals really closed, for each rep's own call (Deals → Your call) and for the AI. **Slip predictor**: close date pushed twice, 14 days idle, no next step, single-threaded or a past close date → "Likely to slip" on Deals and My day, with a task for the owner. The Forecast Analyst sees both.
+- **Meeting-to-pipeline**: every customer meeting gets an outcome (inferred as held after a call analysis, or set on Integrations), a day-before reminder from a template you approve once, and a funnel from meeting to won deal by source and by assistant (Insights).
+- **Relationships and job changes**: who on the team knows whom at an account (meetings count more; recent counts more), used by committee outreach for warm introductions. Key contacts are re-checked quarterly through the enrichment provider; a champion who moved company becomes a signal at the old account and a suggestion at the new one. A hard bounce on an open deal raises "may have left".
+
+*Buyer-facing and proof*
+- **Buyer Room** (Deals → open a deal): a private page per deal for the buying committee through a secret link: summary, proposal and deck, case studies, a mutual action plan they can tick and comment on, and a Questions tab answered only from your knowledge base and the room's documents. Pricing questions (unless you allow them), unverifiable figures and anything the assistant isn't sure about go to the rep as a task. Visitors who give their work email are matched to contacts (new committee members are added); every visit feeds deal health.
+- **Buying-group coverage**: per account, which roles (champion, economic buyer, technical, finance) are engaged and who has never engaged; "single-threaded" is flagged.
+- **ROI Statement** (Insights): hours saved (editable assumptions), meetings, pipeline, wins, AI cost, control-group lift, draft quality, forecast accuracy and inbox placement on one page; download as Word and emailed monthly to `ROI_RECIPIENTS`.
+- **Onboarding in a day**: build the knowledge base from your website (drafts cite their pages and wait for approval), import existing sequences from Outreach, Salesloft or HubSpot as a playbook, CSV import understands their contact exports, and a "Your first hour" checklist on Setup.
+
 **Personalisation gate:** every email and LinkedIn draft is scored 0–100 by a grader against the brief and relationship history. Below `PERSONALISATION_THRESHOLD` (default 60) the writer gets specific feedback and rewrites once. If the rewrite is still below, it is queued with a warning. The score and the facts it used are shown in Approvals.
 
 **AI governance** (**AI governance** page): monthly budgets for total AI spend and per assistant, a model choice per assistant (web-searching assistants can't be set to Haiku), and on/off switches. A run is refused once a budget is reached, and a warning is posted to the Slack approvals channel at 80%.
@@ -273,6 +294,16 @@ Start with a sandbox org.
 | `GET/POST/PUT /api/events`, `POST /api/events/{id}/registrations \| attendance \| follow-up`, `POST /api/webhooks/event-registration` | Events and webinars |
 | `GET /api/customers`, `POST/PUT /api/contracts`, `POST /api/customers/renewals/run` | Customers, renewals, health |
 | `POST /api/approvals/{id}/publish`, `POST /api/campaigns/{id}/spend`, `POST /api/campaigns/{id}/spend/import` | LinkedIn publishing, ad spend |
+| `GET /api/deliverability`, `POST /api/deliverability/mailboxes`, `POST /api/deliverability/mailboxes/{id}/pause \| resume \| remove`, `GET /api/deliverability/dns?domain=`, `POST/GET /api/deliverability/placement-tests` | Deliverability Guardian |
+| `GET/POST /api/public/approvals/{id}/approve \| reject` (signed) | Approve from email |
+| `GET /api/voice`, `POST /api/voice/{owner}/build \| enable \| disable \| delete` | Rep Voice |
+| `POST /api/leads/{id}/quick-update`, `GET /api/suggestions`, `POST /api/suggestions/{id}/add \| dismiss` | Quick update, contact suggestions |
+| `GET /api/forecast/accuracy?period=`, `GET /api/forecast/snapshots`, `GET /api/deals/slip-risk`, `PUT /api/deals/{id}/rep-forecast` | Forecast calibration and slip risk |
+| `PUT /api/meetings/{id}/outcome`, `GET/POST /api/meetings/reminder-template`, `GET /api/insights/meetings` | Meeting-to-pipeline |
+| `GET /api/accounts/{id}/relationships`, `GET /api/accounts/{id}/coverage` | Relationships and buying-group coverage |
+| `POST/GET /api/deals/{id}/room`, `PATCH /api/rooms/{id}`, `GET/POST /api/public/rooms/{token}/…` | Buyer Room |
+| `GET /api/insights/roi-statement(.docx)`, `POST /api/insights/roi-statement/send` | ROI Statement |
+| `POST /api/onboarding/kb-from-website`, `GET /api/kb/drafts`, `POST /api/kb/drafts/{id}/approve \| reject`, `POST /api/onboarding/import-sequences` | Onboarding in a day |
 | `GET /api/insights/quality` | Draft accuracy: approved-without-edits rate, average edit size, reject reasons, per assistant |
 | `GET/POST /api/kb`, `POST /api/kb/upload`, `GET /api/kb/search?q=` | Knowledge base |
 | `POST /api/webhooks/inbound \| reply \| unsubscribe` | Website forms and email provider events (`X-Webhook-Secret` header) |

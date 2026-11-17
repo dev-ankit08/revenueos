@@ -27,8 +27,16 @@ _URL = re.compile(r"(https?://[^\s<>()\"']+)")
 
 @dataclass
 class SendResult:
-    transport: str  # smtp|sendgrid|postmark|dry_run
+    transport: str  # smtp|sendgrid|postmark|gmail|outlook|dry_run
     message_id: str | None = None
+
+
+@dataclass
+class Sender:
+    """Who an email is sent as. provider google/microsoft sends through that person's own mailbox (token)."""
+    address: str
+    provider: str = "smtp"
+    token: str | None = None
 
 
 def active_provider() -> str:
@@ -103,21 +111,75 @@ def send_internal(to: str, subject: str, body: str) -> str:
     return "smtp"
 
 
-def send_email(to: str, subject: str, body: str, *, approval_id: int | None = None) -> SendResult:
+def send_email(to: str, subject: str, body: str, *, approval_id: int | None = None,
+               sender: Sender | None = None) -> SendResult:
+    """Send one approved email. `sender` picks the mailbox from the sending pool (default: SENDER_EMAIL)."""
+    if sender and sender.provider == "google":
+        return _gmail_api(to, subject, body, sender)
+    if sender and sender.provider == "microsoft":
+        return _graph_api(to, subject, body, sender)
+    from_address = sender.address if sender else settings.sender_email
     provider = active_provider()
     if provider == "sendgrid":
-        return _sendgrid(to, subject, body, approval_id)
+        return _sendgrid(to, subject, body, approval_id, from_address)
     if provider == "postmark":
-        return _postmark(to, subject, body, approval_id)
+        return _postmark(to, subject, body, approval_id, from_address)
     if provider == "dry_run":
-        log.warning("Email not configured; dry-run send to %s: %s", to, subject)
+        log.warning("Email not configured; dry-run send from %s to %s: %s", from_address, to, subject)
         return SendResult("dry_run", f"dry-run-{uuid.uuid4().hex[:12]}")
-    return _smtp(to, subject, body)
+    return _smtp(to, subject, body, from_address)
 
 
-def _smtp(to: str, subject: str, body: str) -> SendResult:
+def send_from_mailbox(db, mailbox, to: str, subject: str, body: str) -> SendResult:
+    """Internal test sends from a pool mailbox (inbox placement tests); not for prospects."""
+    return send_email(to, subject, body, sender=sender_for(db, mailbox))
+
+
+def sender_for(db, mailbox) -> Sender:
+    if mailbox.provider in ("google", "microsoft") and mailbox.connection_id:
+        from ..integrations import oauth
+        from ..models import Connection
+
+        conn = db.get(Connection, mailbox.connection_id)
+        if not conn or conn.status != "active":
+            raise RuntimeError(f"The connected mailbox for {mailbox.address} is disconnected. Reconnect it on Integrations.")
+        return Sender(mailbox.address, mailbox.provider, oauth.access_token(db, conn))
+    return Sender(mailbox.address, "smtp")
+
+
+def _rfc822(to: str, subject: str, body: str, from_address: str) -> EmailMessage:
     msg = EmailMessage()
-    msg["From"] = settings.sender_email
+    msg["From"], msg["To"], msg["Subject"] = from_address, to, subject
+    msg["Message-ID"] = make_msgid(domain=from_address.split("@")[-1])
+    msg["List-Unsubscribe"] = _unsubscribe_header(to)
+    if _one_click(to):
+        msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
+    msg.set_content(body)
+    return msg
+
+
+def _gmail_api(to: str, subject: str, body: str, sender: Sender) -> SendResult:
+    import base64
+
+    raw = base64.urlsafe_b64encode(_rfc822(to, subject, body, sender.address).as_bytes()).decode()
+    data = http.request("POST", "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+                        headers={"Authorization": f"Bearer {sender.token}"}, json_body={"raw": raw})
+    return SendResult("gmail", (data or {}).get("id"))
+
+
+def _graph_api(to: str, subject: str, body: str, sender: Sender) -> SendResult:
+    # Graph only allows X- custom headers, so the unsubscribe link travels in the footer (always added).
+    http.request("POST", "https://graph.microsoft.com/v1.0/me/sendMail",
+                 headers={"Authorization": f"Bearer {sender.token}"},
+                 json_body={"message": {"subject": subject, "body": {"contentType": "Text", "content": body},
+                                        "toRecipients": [{"emailAddress": {"address": to}}]},
+                            "saveToSentItems": True})
+    return SendResult("outlook", None)
+
+
+def _smtp(to: str, subject: str, body: str, from_address: str | None = None) -> SendResult:
+    msg = EmailMessage()
+    msg["From"] = from_address or settings.sender_email
     msg["To"] = to
     msg["Subject"] = subject
     msg["Message-ID"] = message_id = make_msgid(domain=(settings.sender_email or "localhost").split("@")[-1])
@@ -133,12 +195,12 @@ def _smtp(to: str, subject: str, body: str) -> SendResult:
     return SendResult("smtp", message_id)
 
 
-def _sendgrid(to: str, subject: str, body: str, approval_id: int | None) -> SendResult:
+def _sendgrid(to: str, subject: str, body: str, approval_id: int | None, from_address: str | None = None) -> SendResult:
     track = _tracking()
     payload = {
         "personalizations": [{"to": [{"email": to}],
                               "custom_args": {"approval_id": str(approval_id)} if approval_id else {}}],
-        "from": {"email": settings.sender_email, "name": settings.company_name},
+        "from": {"email": from_address or settings.sender_email, "name": settings.company_name},
         "subject": subject,
         "content": [{"type": "text/plain", "value": body}, {"type": "text/html", "value": to_html(body)}],
         "headers": {"List-Unsubscribe": _unsubscribe_header(to),
@@ -152,10 +214,10 @@ def _sendgrid(to: str, subject: str, body: str, approval_id: int | None) -> Send
     return SendResult("sendgrid", f"approval-{approval_id}" if approval_id else None)
 
 
-def _postmark(to: str, subject: str, body: str, approval_id: int | None) -> SendResult:
+def _postmark(to: str, subject: str, body: str, approval_id: int | None, from_address: str | None = None) -> SendResult:
     track = _tracking()
     payload = {
-        "From": f"{settings.company_name} <{settings.sender_email}>", "To": to, "Subject": subject,
+        "From": f"{settings.company_name} <{from_address or settings.sender_email}>", "To": to, "Subject": subject,
         "TextBody": body, "HtmlBody": to_html(body), "MessageStream": "outbound",
         "TrackOpens": track, "TrackLinks": "HtmlAndText" if track else "None",
         "Headers": [{"Name": "List-Unsubscribe", "Value": _unsubscribe_header(to)}]

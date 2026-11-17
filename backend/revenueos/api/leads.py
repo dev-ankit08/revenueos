@@ -181,12 +181,15 @@ def crm_import(db: Session = Depends(get_db)):
 
 # Common header spellings from Apollo / ZoomInfo / Sales Navigator / Salesforce exports.
 CSV_ALIASES = {
-    "first_name": ("first_name", "first name", "firstname"),
-    "last_name": ("last_name", "last name", "lastname", "surname"),
-    "email": ("email", "email address", "work email", "business email"),
-    "title": ("title", "job title", "position"),
-    "company": ("company", "company name", "account name", "organization"),
-    "domain": ("domain", "website", "company website", "company domain"),
+    "first_name": ("first_name", "first name", "firstname", "first"),
+    "last_name": ("last_name", "last name", "lastname", "surname", "last"),
+    "email": ("email", "email address", "work email", "business email", "emails", "email 1", "primary email",
+              "email address 1"),
+    "title": ("title", "job title", "position", "occupation"),
+    "company": ("company", "company name", "account name", "organization", "account", "account: name",
+                "associated company"),
+    "domain": ("domain", "website", "company website", "company domain", "company domain name", "account: domain",
+               "website url"),
     "industry": ("industry",),
     "employees": ("employees", "# employees", "employee count", "company size", "number of employees"),
     "country": ("country", "company country", "location country"),

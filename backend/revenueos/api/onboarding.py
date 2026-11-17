@@ -42,7 +42,21 @@ def status(db: Session = Depends(get_db)):
          "detail": "Proves the lift with your own numbers"},
     ]
     required = [s for s in steps if not s.get("optional")]
-    return {"steps": steps, "complete": all(s["done"] for s in required)}
+    from ..models import Approval, KBDraft, SendingMailbox
+
+    pending_drafts = db.scalar(select(func.count()).select_from(KBDraft).where(KBDraft.status == "pending")) or 0
+    first_hour = [
+        {"key": "mailbox", "title": "Connect your mailbox", "done": connected},
+        {"key": "sending", "title": "Add sending mailboxes and check the domain (Deliverability)",
+         "done": db.scalar(select(SendingMailbox.id)) is not None},
+        {"key": "kb_site", "title": "Build the knowledge base from your website",
+         "done": len(docs) >= 4 and not any(SAMPLE_MARK in d.content for d in docs),
+         "detail": f"{pending_drafts} drafts waiting for approval" if pending_drafts else None},
+        {"key": "ten_leads", "title": "Bring in 10 leads", "done": real_leads >= 10, "detail": f"{real_leads} so far"},
+        {"key": "first_drafts", "title": "Review your first drafts in Approvals",
+         "done": db.scalar(select(Approval.id).where(Approval.decided_at.is_not(None))) is not None},
+    ]
+    return {"steps": steps, "complete": all(s["done"] for s in required), "first_hour": first_hour}
 
 
 def _own() -> dict:

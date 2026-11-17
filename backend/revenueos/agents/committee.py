@@ -81,6 +81,7 @@ async def committee_outreach(account_id: int, instructions: str | None = None, r
             "account": name, "industry": account.industry, "brief": brief_to_dict(account.briefs[0] if account.briefs else None),
             "contacts": [{"contact_id": cid, "name": n, "title": t, "dossier": get_dossier(cid)} for cid, n, t in contacts],
             "relationship_history": memory.context_block(account_id),
+            "warm_paths": _warm_paths(db, account_id),
         }
     prompt = f"Plan buying-committee outreach.\n{json.dumps(context, default=str)}"
     if instructions:
@@ -116,3 +117,11 @@ async def committee_outreach(account_id: int, instructions: str | None = None, r
         db.add(doc)
         db.flush()
         return {"document_id": doc.id, "sequenced": written, "missing_roles": plan.missing_roles}
+
+
+def _warm_paths(db, account_id: int) -> list[dict]:
+    """Who on our team already knows whom here; use them for warm introductions."""
+    from ..services import pipeline_intel
+
+    return [{k: r[k] for k in ("rep", "contact", "title", "level", "meetings", "emails")}
+            for r in pipeline_intel.relationships(db, account_id)[:8]]

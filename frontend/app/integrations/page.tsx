@@ -189,15 +189,50 @@ export default function Integrations() {
 
       <h2>Customer meetings</h2>
       <table>
-        <thead><tr><th>Meeting</th><th>When</th><th>Prep brief</th></tr></thead>
+        <thead><tr><th>Meeting</th><th>When</th><th>Prep brief</th><th>Outcome</th></tr></thead>
         <tbody>
           {meetings.map((m) => (
-            <tr key={m.id}><td>{m.title}</td><td>{new Date(m.starts_at).toLocaleString()}</td>
-              <td>{m.prep_status === "done" ? <a href={`/pipeline/${m.contact_id}`}>ready</a> : m.prep_status}</td></tr>
+            <tr key={m.id}><td>{m.title}{m.reminder_sent_at && <div className="muted">reminder sent</div>}</td>
+              <td>{new Date(m.starts_at).toLocaleString()}</td>
+              <td>{m.prep_status === "done" ? <a href={`/pipeline/${m.contact_id}`}>ready</a> : m.prep_status}</td>
+              <td><select value={m.outcome ?? ""} onChange={async (e) => {
+                await api(`/api/meetings/${m.id}/outcome`, { method: "PUT", body: JSON.stringify({ outcome: e.target.value }) });
+                api("/api/integrations/meetings").then(setMeetings); }}>
+                <option value="" disabled>–</option>
+                {["held", "no_show", "qualified", "next_step_booked", "cancelled", "rescheduled"].map((o) =>
+                  <option key={o} value={o}>{o.replaceAll("_", " ")}</option>)}
+              </select></td></tr>
           ))}
-          {!meetings.length && <tr><td colSpan={3} className="muted">No customer meetings received yet.</td></tr>}
+          {!meetings.length && <tr><td colSpan={4} className="muted">No customer meetings received yet.</td></tr>}
         </tbody>
       </table>
+      <ReminderTemplate />
+    </>
+  );
+}
+
+function ReminderTemplate() {
+  const [t, setT] = useState<any>(null);
+  const [form, setForm] = useState({ subject: "Looking forward to {{meeting_time}}",
+    body: "Hi {{first_name}},\n\nLooking forward to {{meeting_title}} on {{meeting_time}}. If anything has changed, just reply and we'll find another time.\n\nThanks" });
+  const [msg, setMsg] = useState("");
+  const load = () => api("/api/meetings/reminder-template").then(setT).catch(() => {});
+  useEffect(() => { load(); }, []);
+  return (
+    <>
+      <h2>Meeting reminders</h2>
+      <p className="muted">A reminder goes to the customer the day before each meeting, which cuts no-shows. You approve the
+        wording once; it uses {"{{first_name}}"}, {"{{company}}"}, {"{{meeting_time}}"} and {"{{meeting_title}}"}.</p>
+      {t?.live && <div className="card"><b>Live:</b> {t.live.subject}<div style={{ whiteSpace: "pre-wrap" }}>{t.live.body}</div></div>}
+      {t?.pending && <p className="muted">A new version is waiting in Approvals (filter: meeting reminders).</p>}
+      <div className="stack" style={{ maxWidth: 640, marginTop: 8 }}>
+        <input value={form.subject} onChange={(e) => setForm({ ...form, subject: e.target.value })} />
+        <textarea rows={5} value={form.body} onChange={(e) => setForm({ ...form, body: e.target.value })} />
+        <div className="row"><button onClick={async () => {
+          try { await post("/api/meetings/reminder-template", form); setMsg("Sent to Approvals."); load(); }
+          catch (e: any) { setMsg(e.message); } }}>{t?.live ? "Propose new wording" : "Set up reminders"}</button>
+          {msg && <span className="muted">{msg}</span>}</div>
+      </div>
     </>
   );
 }

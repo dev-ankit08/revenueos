@@ -149,7 +149,7 @@ def _markdown(a: CallAnalysis) -> str:
 
 async def analyze_call(contact_id: int, transcript: str, parent_run_id: int | None = None,
                        source_ref: str | None = None, occurred_at: datetime | None = None,
-                       title: str | None = None) -> dict:
+                       title: str | None = None, follow_up: bool = True) -> dict:
     """Analyse a call, update/create the opportunity, sync CRM, queue the follow-up, add it to the timeline.
 
     `source_ref` identifies a recording from an integration (prevents analysing it twice).
@@ -211,7 +211,7 @@ async def analyze_call(contact_id: int, transcript: str, parent_run_id: int | No
             created_by_agent="call_analyst", run_id=result.run_id,
             rationale="Post-call follow-up recapping what the prospect said and the agreed next steps.",
             grounding_extra=transcript,
-        )
+        ) if follow_up else None
         crm = get_crm()
         crm.upsert_opportunity(opp)
         crm.log_activity(c, "Call summary", doc.content)
@@ -229,8 +229,9 @@ async def analyze_call(contact_id: int, transcript: str, parent_run_id: int | No
                         due_at=datetime.now(timezone.utc) + timedelta(days=2),
                         notes=f"Agreed on the call with {c.full_name}."))
         db.flush()
-        out = {"opportunity_id": opp.id, "document_id": doc.id, "approval_id": approval.id,
+        out = {"opportunity_id": opp.id, "document_id": doc.id, "approval_id": approval.id if approval else None,
                "stage": a.stage, "health": a.health, "summary": a.summary}
-    await personalisation.grade_approval(out["approval_id"], f"{json.dumps(context, default=str)}\n{transcript[:40_000]}",
-                                         parent_run_id=result.run_id)
+    if out["approval_id"]:
+        await personalisation.grade_approval(out["approval_id"], f"{json.dumps(context, default=str)}\n{transcript[:40_000]}",
+                                             parent_run_id=result.run_id)
     return out

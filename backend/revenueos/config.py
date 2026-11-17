@@ -111,6 +111,18 @@ class Settings:
 
     # Guardrails
     daily_send_cap: int = _int("DAILY_SEND_CAP", 200)
+    # Sending pool (Deliverability page): default cap per mailbox per day, the minimum gap between automated
+    # sends from one mailbox (seconds, with jitter), and your main company domain(s), which should not send cold email.
+    mailbox_daily_cap: int = _int("MAILBOX_DAILY_CAP", 40)
+    # ROI statement: who gets it monthly (comma-separated), minutes saved per assistant task (JSON overrides), and an
+    # optional loaded hourly cost to value the time saved.
+    roi_recipients: str = os.getenv("ROI_RECIPIENTS", "")
+    roi_minutes: str = os.getenv("ROI_MINUTES", "{}")
+    roi_hourly_cost: float = float(os.getenv("ROI_HOURLY_COST", "0") or 0)
+    # Day-before meeting reminders (sent from the approved reminder template).
+    meeting_reminder_hours: int = _int("MEETING_REMINDER_HOURS", 24)
+    mailbox_min_gap_seconds: int = _int("MAILBOX_MIN_GAP_SECONDS", 90)
+    primary_domain: str = os.getenv("PRIMARY_DOMAIN", "")
     per_domain_daily_cap: int = _int("PER_DOMAIN_DAILY_CAP", 3)
 
     # Email delivery: "smtp" (default; dry-run when SMTP_HOST is blank), "sendgrid" or "postmark".
@@ -209,6 +221,8 @@ WORKSPACE_KEYS = {
     "brief_max_age_days", "dossier_max_age_days",
     "enrichment_provider", "apollo_api_key", "verification_provider", "zerobounce_api_key", "neverbounce_api_key",
     "digest_hour", "alert_email", "consent_required_countries",
+    "mailbox_daily_cap", "mailbox_min_gap_seconds", "primary_domain",
+    "roi_recipients", "roi_minutes", "roi_hourly_cost", "meeting_reminder_hours",
     "intent_pages", "intent_create_accounts", "event_engaged_minutes", "renewal_lead_days",
     "linkedin_access_token", "linkedin_author_urn",
 }

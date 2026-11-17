@@ -44,6 +44,8 @@ export default function Insights() {
   const [winLoss, setWinLoss] = useState<any>(null);
   const [mta, setMta] = useState<any>(null);
   const [mtaModel, setMtaModel] = useState("w_shaped");
+  const [meet, setMeet] = useState<any>(null);
+  const [roiStmt, setRoiStmt] = useState<any>(null);
   const [busy, setBusy] = useState("");
   const [msg, setMsg] = useState("");
 
@@ -61,6 +63,8 @@ export default function Insights() {
     api("/api/insights/reps").then(setReps).catch(() => {});
     api("/api/insights/win-loss").then(setWinLoss).catch(() => {});
     api("/api/insights/attribution/multi-touch").then(setMta).catch(() => {});
+    api("/api/insights/meetings").then(setMeet).catch(() => {});
+    api("/api/insights/roi-statement").then(setRoiStmt).catch(() => {});
   };
   useEffect(load, []);
 
@@ -122,6 +126,26 @@ export default function Insights() {
         <ReactMarkdown>{report.content}</ReactMarkdown>
       </div>}
 
+      {roiStmt && (
+        <>
+          <h2>ROI statement (last {roiStmt.period_days} days)</h2>
+          <div className="grid">
+            <Stat label="Hours saved" value={roiStmt.efficiency.hours_saved} />
+            <Stat label="AI cost" value={`$${roiStmt.efficiency.ai_spend_usd.toLocaleString()}`} />
+            <Stat label="New pipeline" value={money(roiStmt.outcomes.new_pipeline)} />
+            <Stat label="Won" value={money(roiStmt.outcomes.won_revenue)} />
+          </div>
+          <div className="row" style={{ marginTop: 8 }}>
+            <button onClick={async () => {
+              const res = await fetch(`${API_URL}/api/insights/roi-statement.docx`, { headers: authToken() ? { Authorization: `Bearer ${authToken()}` } : {} });
+              const blob = await res.blob(); const a = document.createElement("a");
+              a.href = URL.createObjectURL(blob); a.download = "roi-statement.docx"; a.click();
+            }}>Download for leadership (Word)</button>
+            <span className="muted">Emailed monthly to the recipients set in Settings.</span>
+          </div>
+        </>
+      )}
+
       {funnel && (
         <>
           <h2>Funnel</h2>
@@ -162,10 +186,31 @@ export default function Insights() {
         </>
       )}
 
+      {quality?.rep_voice?.with_voice?.decided > 0 && (
+        <p className="muted">Rep Voice: drafts in the rep's own style sent unedited {pct(quality.rep_voice.with_voice.approved_unedited_pct)}
+          (average edit {pct(quality.rep_voice.with_voice.avg_edit_pct)}) vs {pct(quality.rep_voice.without_voice.approved_unedited_pct)}
+          without (average edit {pct(quality.rep_voice.without_voice.avg_edit_pct)}).</p>
+      )}
       {quality?.grader_calibration && (
         <p className="muted">Grader check: {quality.grader_calibration.verdict}
           {quality.grader_calibration["80_plus"].drafts > 0 && <> · 80+ scores sent unedited {pct(quality.grader_calibration["80_plus"].approved_unedited_pct)}
             vs under 60: {pct(quality.grader_calibration.under_60.approved_unedited_pct)}</>}</p>
+      )}
+
+      {meet && meet.total.meetings > 0 && (
+        <>
+          <h2>From meeting to revenue (last {meet.days} days)</h2>
+          <div className="grid">
+            <Stat label="Customer meetings" value={meet.total.meetings} />
+            <Stat label="Show rate" value={pct(meet.total.show_rate)} />
+            <Stat label="Meeting to deal" value={pct(meet.total.meeting_to_opportunity)} />
+            <Stat label="Won" value={meet.total.won} />
+          </div>
+          <table style={{ marginTop: 8 }}><thead><tr><th>First email from</th><th>Meetings</th><th>No-shows</th><th>Became a deal</th><th>Won</th></tr></thead>
+            <tbody>{Object.entries(meet.by_assistant).map(([k, v]: [string, any]) => (
+              <tr key={k}><td>{k}</td><td>{v.meetings}</td><td>{v.no_show}</td><td>{pct(v.meeting_to_opportunity)}</td><td>{v.won}</td></tr>))}</tbody></table>
+          {meet.unrecorded_outcomes > 0 && <p className="muted">{meet.unrecorded_outcomes} meetings have no outcome yet: set them on Integrations → Customer meetings.</p>}
+        </>
       )}
 
       {reps?.reps?.length > 0 && (

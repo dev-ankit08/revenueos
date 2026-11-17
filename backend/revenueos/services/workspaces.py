@@ -13,8 +13,9 @@ _cache: dict[int | None, dict] = {}
 INT_KEYS = {"smtp_port", "daily_send_cap", "per_domain_daily_cap", "personalisation_threshold",
             "signal_scan_interval_days", "review_interval_days", "send_window_start_hour", "send_window_end_hour",
             "mql_score", "mql_sla_hours", "brief_max_age_days", "dossier_max_age_days", "digest_hour",
-            "event_engaged_minutes", "renewal_lead_days"}
-FLOAT_KEYS = {"holdout_pct", "quarterly_target"}
+            "event_engaged_minutes", "renewal_lead_days", "mailbox_daily_cap", "mailbox_min_gap_seconds",
+            "meeting_reminder_hours"}
+FLOAT_KEYS = {"holdout_pct", "quarterly_target", "roi_hourly_cost"}
 BOOL_KEYS = {"email_tracking", "send_weekdays_only", "utm_enabled", "intent_create_accounts"}
 
 

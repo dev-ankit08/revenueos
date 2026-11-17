@@ -119,6 +119,10 @@ def process_message(db: Session, provider: str, msg: dict, mailbox: str | None) 
     memory.record(db, source="email", source_ref=source_ref, contact_id=c.id, author=mailbox,
                   occurred_at=msg["sent_at"], title=msg["subject"], raw_text=inbound.strip_quoted(msg["text"])[:20000],
                   summary=f"{mailbox or 'Rep'} emailed {c.full_name}: \"{msg['subject']}\"", processed=True)
+    from ..services import pipeline_intel
+
+    pipeline_intel.capture_rep_email(db, c, msg["subject"], inbound.strip_quoted(msg["text"]), mailbox,
+                                     list(msg.get("to") or []) + list(msg.get("cc") or []), msg["sent_at"])
     return "outbound"
 
 

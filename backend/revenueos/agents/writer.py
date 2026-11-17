@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from ..config import settings
 from ..db import session_scope
 from ..models import Activity, Contact
-from ..services import approvals, memory, personalisation
+from ..services import approvals, guardrails, memory, personalisation, voice
 from .base import new_run, run_agent
 from .person_researcher import get_dossier
 from .shared_tools import brief_to_dict, get_account, get_contact, kb_search
@@ -49,7 +49,7 @@ Writing rules:
 
 
 def make_queue_tool(account_contact_ids: set[int], run_id: int, grounding: str, agent_name: str = "outreach_writer",
-                    enroll: bool = False):
+                    enroll: bool = False, voice_on: bool = False):
     """`enroll=True` for multi-step sequences: steps join the contact's enrollment and are sent by the
     sequence engine (services/sequences.py) on schedule, inside business hours."""
     rewrites: set[tuple] = set()  # drafts already sent back once for being too generic
@@ -99,6 +99,12 @@ def make_queue_tool(account_contact_ids: set[int], run_id: int, grounding: str, 
         with session_scope() as db:
             c = db.get(Contact, contact_id)
             recipient = {"name": c.full_name, "title": c.title, "company": c.account.name}
+            repeats = guardrails.followup_problems(db, c, sequence_step, body) if channel != "call_task" else []
+        fkey = ("followup", contact_id, sequence_step, variant)
+        if repeats and fkey not in rewrites:
+            rewrites.add(fkey)
+            return (f"NOT queued: this follow-up {'; '.join(repeats)}. Each follow-up must add NEW value: a different "
+                    "angle, insight, proof point or question. Rewrite it and call queue_message again.")
 
         # Personalisation gate: one rewrite with feedback, then queue with a warning if still generic.
         g = await personalisation.grade(subject=subject, body=body, recipient=recipient, evidence=grounding,
@@ -125,6 +131,10 @@ def make_queue_tool(account_contact_ids: set[int], run_id: int, grounding: str, 
             for f in extra:
                 if f["code"] == "low_personalisation":
                     f["message"] = f"Personalisation {g.score}/100 after a rewrite. {g.feedback}"
+            if repeats:
+                extra.append({"severity": "warn", "code": "repetitive_followup",
+                              "message": f"This follow-up {'; '.join(repeats)}, even after a rewrite."})
+            approval.voice_applied = voice_on
             approval.guardrail_flags = [*approval.guardrail_flags, *extra]
             flags = approval.guardrail_flags
             approval_id = approval.id
@@ -174,13 +184,18 @@ async def write_sequence(
                    + json.dumps(dossier, default=str))
         grounding += json.dumps(dossier, default=str)
 
+    with session_scope() as db:
+        style = voice.instructions_for(db, db.get(Contact, contact_id).owner)
+    if style:
+        prompt += "\n\n" + style
     run_id = new_run("outreach_writer", settings.model_worker, prompt, parent_run_id)
     result = await run_agent(
         agent="outreach_writer",
         model=settings.model_worker,
         role_prompt=ROLE,
         prompt=prompt,
-        tools=[get_contact, get_account, kb_search, make_queue_tool({contact_id}, run_id, grounding, enroll=True)],
+        tools=[get_contact, get_account, kb_search, make_queue_tool({contact_id}, run_id, grounding, enroll=True,
+                                                                     voice_on=bool(style))],
         effort="medium",
         run_id=run_id,
     )

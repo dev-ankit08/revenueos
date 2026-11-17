@@ -88,7 +88,7 @@ function Draft({ a, reviewer, needName, reasons, onDone }:
       <div className="row">
         <button className="primary" disabled={busy} onClick={() => decide("approve")}
           title={blocked ? "Fix the blocking issue in the text, then approve" : undefined}>
-          {a.kind === "content" ? "Approve for publishing" : a.kind === "nurture_email" ? "Approve nurture step" : a.kind !== "email" ? "Approve (copy & send manually)" : a.send_after_days > 0 ? "Approve & schedule" : "Approve & send"}
+          {a.kind === "content" ? "Approve for publishing" : a.kind === "nurture_email" ? "Approve nurture step" : a.kind === "meeting_reminder" ? "Approve reminder" : a.kind !== "email" ? "Approve (copy & send manually)" : a.send_after_days > 0 ? "Approve & schedule" : "Approve & send"}
         </button>
         {!rejecting && <button className="danger" disabled={busy} onClick={() => setRejecting(true)}>Reject</button>}
         {a.kind !== "email" && <button onClick={() => navigator.clipboard.writeText(body)}>Copy text</button>}
@@ -153,6 +153,7 @@ export default function Approvals() {
           <option value="linkedin_message">LinkedIn messages</option>
           <option value="content">marketing content</option>
           <option value="nurture_email">nurture emails</option>
+          <option value="meeting_reminder">meeting reminders</option>
         </select>
         <select style={{ maxWidth: 170 }} value={order} onChange={(e) => setOrder(e.target.value)}>
           <option value="contact">grouped by person</option>

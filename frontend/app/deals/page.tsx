@@ -87,7 +87,18 @@ export default function Deals() {
                   </select>
                 </td>
                 <td>{d.amount ? d.amount.toLocaleString() : "–"}</td>
-                <td>{d.close_date ?? "–"}</td>
+                <td>{d.close_date ?? "–"}
+                  {d.close_date_pushes > 0 && <div className="muted">moved {d.close_date_pushes}x</div>}
+                  {(d.slip_risk === "high" || d.slip_risk === "medium") &&
+                    <div className={d.slip_risk === "high" ? "error" : "muted"} title={(d.slip_reasons ?? []).join("; ")}>
+                      {d.slip_risk === "high" ? "Likely to slip" : "Slip risk"}</div>}
+                  <select style={{ marginTop: 4, fontSize: 12 }} value={d.rep_forecast_category ?? ""} title="Your forecast call"
+                    onChange={async (e) => { await api(`/api/deals/${d.id}/rep-forecast`, { method: "PUT",
+                      body: JSON.stringify({ category: e.target.value }) }); load(); }}>
+                    <option value="" disabled>Your call…</option>
+                    <option value="commit">commit</option><option value="best_case">best case</option>
+                    <option value="pipeline">pipeline</option><option value="omitted">omit</option>
+                  </select></td>
                 <td>{d.health && <span className={`pill health-${d.health}`}>{d.health}</span>}</td>
                 <td>{d.win_probability ?? "–"}{d.forecast_category && <div className="muted">{d.forecast_category}</div>}</td>
                 <td>{d.next_steps?.[0] ?? <span className="muted">none</span>}</td>
@@ -112,6 +123,7 @@ export default function Deals() {
                         <ReactMarkdown>{strategy[d.id].content}</ReactMarkdown>
                       </div>
                     )}
+                    <DealRoom dealId={d.id} accountId={d.account_id} />
                     {d.primary_contact_id && <Link href={`/pipeline/${d.primary_contact_id}`}>Open primary contact →</Link>}
                   </td>
                 </tr>
@@ -122,5 +134,75 @@ export default function Deals() {
         </tbody>
       </table>
     </>
+  );
+}
+
+
+function DealRoom({ dealId, accountId }: { dealId: number; accountId: number }) {
+  const [room, setRoom] = useState<any>(undefined);
+  const [cov, setCov] = useState<any>(null);
+  const [answers, setAnswers] = useState<Record<number, string>>({});
+  const [msg, setMsg] = useState("");
+  const load = () => {
+    api(`/api/deals/${dealId}/room`).then(setRoom).catch(() => setRoom(null));
+    api(`/api/accounts/${accountId}/coverage`).then(setCov).catch(() => {});
+  };
+  useEffect(load, [dealId]);
+
+  async function create(generate: boolean) {
+    setMsg("Creating the room…");
+    try { const { run_id } = await post(`/api/deals/${dealId}/room`, { generate }); await waitForRun(run_id); setMsg(""); load(); }
+    catch (e: any) { setMsg(e.message); }
+  }
+  async function patchRoom(body: object) { await api(`/api/rooms/${room.id}`, { method: "PATCH", body: JSON.stringify(body) }); load(); }
+
+  return (
+    <div className="stack" style={{ marginTop: 12 }}>
+      {cov && (
+        <div className="card">
+          <b>Buying group: {cov.score}% covered</b>{cov.single_threaded && <span className="error"> · single-threaded</span>}
+          <div className="muted">
+            {Object.entries(cov.roles).map(([r, names]: [string, any]) => `${r.replace("_", " ")}: ${names.length ? names.join(", ") : "nobody engaged"}`).join(" · ")}
+          </div>
+          {cov.never_engaged.length > 0 && <div className="muted">Known but never engaged: {cov.never_engaged.join(", ")}</div>}
+        </div>
+      )}
+      <div className="card stack">
+        <b>Buyer room</b>
+        {room === null && (
+          <>
+            <div className="muted">A private page for the buying committee: summary, proposal, case studies, a shared plan they can
+              tick, and answers to their questions from your knowledge base. You see who looked at what.</div>
+            <div className="row">
+              <button className="primary" onClick={() => create(true)}>Create with AI</button>
+              <button onClick={() => create(false)}>Create with the standard plan</button>
+              {msg && <span className="muted">{msg}</span>}
+            </div>
+          </>
+        )}
+        {room && (
+          <>
+            <div className="row">
+              <input readOnly value={room.url} style={{ maxWidth: 460 }} />
+              <button onClick={() => navigator.clipboard.writeText(room.url)}>Copy link</button>
+              <label className="row" style={{ gap: 6 }}><input type="checkbox" style={{ width: "auto" }} checked={room.allow_pricing}
+                onChange={(e) => patchRoom({ allow_pricing: e.target.checked })} /> Assistant may answer pricing questions</label>
+            </div>
+            <div className="muted">Plan: {room.plan_progress.done}/{room.plan_progress.total} steps done ·
+              {room.visitors.length ? ` ${room.visitors.length} visitor(s): ` + room.visitors.map((v: any) => `${v.visitor} (${v.minutes} min)`).join(", ") : " no visits yet"}</div>
+            {room.pending_questions.map((q: any) => (
+              <div className="card" key={q.id}><b>Waiting for you</b> <span className="muted">({q.visitor})</span>: {q.question}
+                <div className="row">
+                  <input placeholder="Your answer (shown to the buyer in the room)" value={answers[q.id] ?? ""}
+                    onChange={(e) => setAnswers({ ...answers, [q.id]: e.target.value })} />
+                  <button className="primary" disabled={!answers[q.id]} onClick={async () => {
+                    await post(`/api/rooms/${room.id}/questions/${q.id}/answer`, { answer: answers[q.id] }); load(); }}>Send answer</button>
+                </div>
+              </div>
+            ))}
+          </>
+        )}
+      </div>
+    </div>
   );
 }

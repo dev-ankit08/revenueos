@@ -60,14 +60,15 @@ def bind_loop(loop: asyncio.AbstractEventLoop) -> None:
 
 
 LEASE = "scheduler"
-PERSISTED = ("hygiene_day", "signals", "review", "digest_day", "alerts_since")  # survive restarts (stored on the lease row)
+PERSISTED = ("hygiene_day", "signals", "review", "digest_day", "alerts_since", "forecast_week", "roi_month")  # survive restarts (stored on the lease row)
 STUCK_RUN_AFTER = timedelta(hours=2)
 
 
 def _encode(st: dict) -> dict:
     out = {k: st[k].isoformat() for k in PERSISTED if isinstance(st.get(k), (date, datetime))}
-    if isinstance(st.get("digest_day"), str):
-        out["digest_day"] = st["digest_day"]
+    for key in ("digest_day", "forecast_week", "roi_month"):
+        if isinstance(st.get(key), str):
+            out[key] = st[key]
     return out
 
 
@@ -75,7 +76,7 @@ def _decode(saved: dict) -> dict:
     out: dict = {}
     for k, v in (saved or {}).items():
         try:
-            if k == "digest_day":
+            if k in ("digest_day", "forecast_week", "roi_month"):
                 out[k] = v
             else:
                 out[k] = date.fromisoformat(v) if k == "hygiene_day" else datetime.fromisoformat(v)
@@ -176,6 +177,34 @@ async def _tick(st: dict) -> None:
     except Exception:
         log.exception("context processing failed")
     try:
+        from .services import pipeline_intel
+
+        with session_scope() as db:
+            pipeline_intel.infer_outcomes(db)
+            pipeline_intel.send_reminders(db)
+        month = now.strftime("%Y-%m")
+        if st.get("roi_month") != month and now.day == 1:
+            from .services import roi_statement
+
+            with session_scope() as db:
+                roi_statement.send_monthly(db)
+            st["roi_month"] = month
+        week = now.strftime("%G-W%V")
+        if st.get("forecast_week") != week:
+            with session_scope() as db:
+                pipeline_intel.take_snapshot(db)
+            st["forecast_week"] = week
+    except Exception:
+        log.exception("pipeline intelligence failed")
+    try:
+        from .services import deliverability
+
+        with session_scope() as db:
+            deliverability.refresh_warmup_status(db)
+            deliverability.evaluate_all(db)
+    except Exception:
+        log.exception("deliverability check failed")
+    try:
         _notify_tick(st)
     except Exception:
         log.exception("notifications failed")
@@ -190,6 +219,10 @@ async def _tick(st: dict) -> None:
                 privacy.purge_old(db)
                 growth.create_due_renewals(db)
                 growth.refresh_health(db)
+                from .services import pipeline_intel
+
+                pipeline_intel.flag_slips(db)
+                pipeline_intel.check_job_changes(db)
             st["hygiene_day"] = now.date()
     except Exception:
         log.exception("hygiene report failed")

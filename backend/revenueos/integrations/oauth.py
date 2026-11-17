@@ -1,6 +1,7 @@
 """OAuth for Google (Gmail, Calendar, Meet) and Microsoft 365 (Outlook mail, calendar, Teams transcripts).
 
-Each rep connects their own account once; access is READ-ONLY. Refresh tokens are encrypted at rest.
+Each rep connects their own account once. Reading powers the timeline; the send permission is used only to send
+emails a person has approved, when the rep adds their mailbox to the sending pool. Refresh tokens are encrypted at rest.
 """
 import secrets as pysecrets
 import time
@@ -20,6 +21,7 @@ PROVIDERS = {
         "token_url": "https://oauth2.googleapis.com/token",
         "scopes": ["openid", "email",
                    "https://www.googleapis.com/auth/gmail.readonly",
+                   "https://www.googleapis.com/auth/gmail.send",
                    "https://www.googleapis.com/auth/calendar.readonly",
                    "https://www.googleapis.com/auth/meetings.space.readonly"],
         "extra": {"access_type": "offline", "prompt": "consent"},
@@ -27,7 +29,7 @@ PROVIDERS = {
     "microsoft": {
         "auth_url": "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize",
         "token_url": "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token",
-        "scopes": ["offline_access", "User.Read", "Mail.Read", "Calendars.Read",
+        "scopes": ["offline_access", "User.Read", "Mail.Read", "Mail.Send", "Calendars.Read",
                    "OnlineMeetings.Read", "OnlineMeetingTranscript.Read.All"],
         "extra": {},
     },
